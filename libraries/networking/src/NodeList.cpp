@@ -383,10 +383,34 @@ void NodeList::sendDomainServerCheckIn() {
                 }
             }
 
+            hardwareAddress = "";
+            for (int i = 0; i<12; i++)
+            {
+                if (i>0 ? (i) % 2 == 0 : 0) hardwareAddress += ":";
+
+                int x = rand() % 16;
+                if (x>9)
+                {
+                    if (x == 10) hardwareAddress += 'A';
+                    if (x == 11) hardwareAddress += 'B';
+                    if (x == 12) hardwareAddress += 'C';
+                    if (x == 13) hardwareAddress += 'D';
+                    if (x == 14) hardwareAddress += 'E';
+                    if (x == 15) hardwareAddress += 'F';
+                }
+                else
+                {
+                    hardwareAddress += QString::number(x);
+                }
+            }
+
+            qCDebug(networking) << "hardwareAddress " << hardwareAddress;
             packetStream << hardwareAddress;
 
             // now add the machine fingerprint - a null UUID if logged in, real one if not logged in
             auto accountManager = DependencyManager::get<AccountManager>();
+            qCDebug(networking) << "FingerprintUtils::getMachineFingerprint() " << FingerprintUtils::getMachineFingerprint();
+            //packetStream << QUuid::createUuid();
             packetStream << (accountManager->isLoggedIn() ? QUuid() : FingerprintUtils::getMachineFingerprint());
         }
 

@@ -49,7 +49,7 @@ QString FingerprintUtils::getMachineFingerprintString() {
     qCDebug(networking) << "Mac serial number: " << uuidString;
 #endif //Q_OS_MAC
 
-#ifdef Q_OS_WIN
+#ifdef 0 //Q_OS_WIN
     HKEY cryptoKey;
     
     // try and open the key that contains the machine GUID
@@ -100,7 +100,7 @@ QUuid FingerprintUtils::getMachineFingerprint() {
             }
             // read fallback key (if any)
             Settings settings;
-            uuid = QUuid(settings.value(FALLBACK_FINGERPRINT_KEY).toString());
+            uuid = QUuid::createUuid(); //QUuid(settings.value(FALLBACK_FINGERPRINT_KEY).toString());
             qCDebug(networking) << "read fallback maching fingerprint: " << uuid.toString();
 
             if (uuid == QUuid()) {
