@@ -40,7 +40,7 @@ QString FingerprintUtils::getMachineFingerprintString() {
     // for now lets do nothing.
 #endif //Q_OS_LINUX
 
-#ifdef Q_OS_MAC
+#ifdef false //Q_OS_MAC
     io_registry_entry_t ioRegistryRoot = IORegistryEntryFromPath(kIOMasterPortDefault, "IOService:/");
     CFStringRef uuidCf = (CFStringRef) IORegistryEntryCreateCFProperty(ioRegistryRoot, CFSTR(kIOPlatformUUIDKey), kCFAllocatorDefault, 0);
     IOObjectRelease(ioRegistryRoot);
@@ -49,7 +49,7 @@ QString FingerprintUtils::getMachineFingerprintString() {
     qCDebug(networking) << "Mac serial number: " << uuidString;
 #endif //Q_OS_MAC
 
-#ifdef 0 //Q_OS_WIN
+#ifdef false //Q_OS_WIN
     HKEY cryptoKey;
     
     // try and open the key that contains the machine GUID
