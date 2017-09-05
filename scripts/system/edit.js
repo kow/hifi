@@ -424,10 +424,10 @@ var toolBar = (function () {
         tablet.fromQml.connect(fromQml);
 
         createButton.clicked.connect(function() {
-            if ( ! (Entities.canRez() || Entities.canRezTmp()) ) {
-                Window.notifyEditError(INSUFFICIENT_PERMISSIONS_ERROR_MSG);
-                return;
-            }
+            //if ( ! (Entities.canRez() || Entities.canRezTmp()) ) {
+            //    Window.notifyEditError(INSUFFICIENT_PERMISSIONS_ERROR_MSG);
+            //    return;
+            //}
 
             that.toggle();
         });
@@ -633,10 +633,10 @@ var toolBar = (function () {
         if (active === isActive) {
             return;
         }
-        if (active && !Entities.canRez() && !Entities.canRezTmp()) {
-            Window.notifyEditError(INSUFFICIENT_PERMISSIONS_ERROR_MSG);
-            return;
-        }
+        //if (active && !Entities.canRez() && !Entities.canRezTmp()) {
+        //    Window.notifyEditError(INSUFFICIENT_PERMISSIONS_ERROR_MSG);
+        //    return;
+        //}
         Messages.sendLocalMessage("edit-events", JSON.stringify({
             enabled: active
         }));
