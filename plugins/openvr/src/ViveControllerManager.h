@@ -79,10 +79,10 @@ private:
         void sendUserActivityData(QString activity);
         void configureCalibrationSettings(const QJsonObject configurationSettings);
         QJsonObject configurationSettings();
-        controller::Pose addOffsetToPuckPose(int joint) const;
+        controller::Pose addOffsetToPuckPose(const controller::InputCalibrationData& inputCalibration, int joint) const;
         glm::mat4 calculateDefaultToReferenceForHeadPuck(const controller::InputCalibrationData& inputCalibration);
         glm::mat4 calculateDefaultToReferenceForHmd(const controller::InputCalibrationData& inputCalibration);
-        void updateCalibratedLimbs();
+        void updateCalibratedLimbs(const controller::InputCalibrationData& inputCalibration);
         bool checkForCalibrationEvent();
         void handleHandController(float deltaTime, uint32_t deviceIndex, const controller::InputCalibrationData& inputCalibrationData, bool isLeftHand);
         void handleHmd(uint32_t deviceIndex, const controller::InputCalibrationData& inputCalibrationData);
@@ -112,7 +112,6 @@ private:
         void calibrateFromUI(const controller::InputCalibrationData& inputCalibrationData);
         void emitCalibrationStatus();
         void calibrateNextFrame();
-
 
         class FilteredStick {
         public:
@@ -195,6 +194,8 @@ private:
         bool _overrideHands { false };
         mutable std::recursive_mutex _lock;
 
+        bool _hmdTrackingEnabled { true };
+
         QString configToString(Config config);
         friend class ViveControllerManager;
     };
@@ -204,7 +205,10 @@ private:
     bool _registeredWithInputMapper { false };
     bool _modelLoaded { false };
     bool _resetMatCalculated { false };
+
     bool _desktopMode { false };
+    bool _hmdDesktopTracking { false };
+    
     glm::mat4 _resetMat { glm::mat4() };
     model::Geometry _modelGeometry;
     gpu::TexturePointer _texture;

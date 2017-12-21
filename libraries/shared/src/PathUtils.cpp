@@ -9,6 +9,8 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
+#include "PathUtils.h"
+
 #include <QCoreApplication>
 #include <QString>
 #include <QVector>
@@ -16,10 +18,15 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QUrl>
-#include "PathUtils.h"
 #include <QtCore/QStandardPaths>
+#include <QRegularExpression>
 #include <mutex> // std::once
 #include "shared/GlobalAppProperties.h"
+#include "SharedUtil.h"
+
+// Format: AppName-PID-Timestamp
+// Example: ...
+QString TEMP_DIR_FORMAT { "%1-%2-%3" };
 
 const QString& PathUtils::resourcesPath() {
 #ifdef Q_OS_MAC
@@ -52,6 +59,53 @@ QString PathUtils::getAppDataFilePath(const QString& filename) {
 
 QString PathUtils::getAppLocalDataFilePath(const QString& filename) {
     return QDir(getAppLocalDataPath()).absoluteFilePath(filename);
+}
+
+QString PathUtils::generateTemporaryDir() {
+    QDir rootTempDir = QDir::tempPath();
+    QString appName = qApp->applicationName();
+    for (auto i = 0; i < 64; ++i) {
+        auto now = std::chrono::system_clock::now().time_since_epoch().count();
+        auto dirName = TEMP_DIR_FORMAT.arg(appName).arg(qApp->applicationPid()).arg(now);
+        QDir tempDir = rootTempDir.filePath(dirName);
+        if (tempDir.mkpath(".")) {
+            return tempDir.absolutePath();
+        }
+    }
+    return "";
+}
+
+// Delete all temporary directories for an application
+int PathUtils::removeTemporaryApplicationDirs(QString appName) {
+    if (appName.isNull()) {
+        appName = qApp->applicationName();
+    }
+
+    auto dirName = TEMP_DIR_FORMAT.arg(appName).arg("*").arg("*");
+
+    QDir rootTempDir = QDir::tempPath();
+    auto dirs = rootTempDir.entryInfoList({ dirName }, QDir::Dirs);
+    int removed = 0;
+    for (auto& dir : dirs) {
+        auto dirName = dir.fileName();
+        auto absoluteDirPath = QDir(dir.absoluteFilePath());
+        QRegularExpression re { "^" + QRegularExpression::escape(appName) + "\\-(?<pid>\\d+)\\-(?<timestamp>\\d+)$" };
+
+        auto match = re.match(dirName);
+        if (match.hasMatch()) {
+            auto pid = match.capturedRef("pid").toLongLong();
+            auto timestamp = match.capturedRef("timestamp");
+            if (!processIsRunning(pid)) {
+                qDebug() << "  Removing old temporary directory: " << dir.absoluteFilePath();
+                absoluteDirPath.removeRecursively();
+                removed++;
+            } else {
+                qDebug() << "  Not removing (process is running): " << dir.absoluteFilePath();
+            }
+        }
+    }
+
+    return removed;
 }
 
 QString fileNameWithoutExtension(const QString& fileName, const QVector<QString> possibleExtensions) {
@@ -92,18 +146,17 @@ QUrl PathUtils::defaultScriptsLocation(const QString& newDefaultPath) {
     if (!overriddenDefaultScriptsLocation.isEmpty()) {
         path = overriddenDefaultScriptsLocation;
     } else {
-#ifdef Q_OS_WIN
-        path = QCoreApplication::applicationDirPath() + "/scripts";
-#elif defined(Q_OS_OSX)
+#if defined(Q_OS_OSX)
         path = QCoreApplication::applicationDirPath() + "/../Resources/scripts";
+#elif defined(Q_OS_ANDROID)
+        path = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/scripts";
 #else
         path = QCoreApplication::applicationDirPath() + "/scripts";
 #endif
     }
 
     // turn the string into a legit QUrl
-    QFileInfo fileInfo(path);
-    return QUrl::fromLocalFile(fileInfo.canonicalFilePath());
+    return QUrl::fromLocalFile(QFileInfo(path).canonicalFilePath());
 }
 
 QString PathUtils::stripFilename(const QUrl& url) {

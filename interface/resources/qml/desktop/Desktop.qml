@@ -50,7 +50,26 @@ FocusScope {
     property bool desktopRoot: true
 
     // The VR version of the primary menu
-    property var rootMenu: Menu { objectName: "rootMenu" }
+    property var rootMenu: Menu { 
+        id: rootMenuId
+        objectName: "rootMenu" 
+
+        property var exclusionGroups: ({});
+        property Component exclusiveGroupMaker: Component {
+            ExclusiveGroup {
+            }
+        }
+
+        function addExclusionGroup(qmlAction, exclusionGroup) {
+
+            var exclusionGroupId = exclusionGroup.toString();
+            if(!exclusionGroups[exclusionGroupId]) {
+                exclusionGroups[exclusionGroupId] = exclusiveGroupMaker.createObject(rootMenuId);
+            }
+
+            qmlAction.exclusiveGroup = exclusionGroups[exclusionGroupId]
+        }
+    }
 
     // FIXME: Alpha gradients display as fuschia under QtQuick 2.5 on OSX/AMD
     //        because shaders are 4.2, and do not include #version declarations.
@@ -73,7 +92,7 @@ FocusScope {
                 return;
             }
             var oldRecommendedRect = recommendedRect;
-            var newRecommendedRectJS = (typeof Controller === "undefined") ? Qt.rect(0,0,0,0) : Controller.getRecommendedOverlayRect();
+            var newRecommendedRectJS = (typeof Controller === "undefined") ? Qt.rect(0,0,0,0) : Controller.getRecommendedHUDRect();
             var newRecommendedRect = Qt.rect(newRecommendedRectJS.x, newRecommendedRectJS.y,
                                     newRecommendedRectJS.width,
                                     newRecommendedRectJS.height);
@@ -256,7 +275,7 @@ FocusScope {
 
             var oldRecommendedRect = recommendedRect;
             var oldRecommendedDimmensions = { x: oldRecommendedRect.width, y: oldRecommendedRect.height };
-            var newRecommendedRect = Controller.getRecommendedOverlayRect();
+            var newRecommendedRect = Controller.getRecommendedHUDRect();
             var newRecommendedDimmensions = { x: newRecommendedRect.width, y: newRecommendedRect.height };
             var windows = d.getTopLevelWindows();
             for (var i = 0; i < windows.length; ++i) {
@@ -281,6 +300,27 @@ FocusScope {
 
     function togglePinned() {
         pinned = !pinned
+    }
+
+    function isPointOnWindow(point) {
+        for (var i = 0; i < desktop.visibleChildren.length; i++) {
+            var child = desktop.visibleChildren[i];
+            if (child.hasOwnProperty("modality")) {
+                var mappedPoint = mapToItem(child, point.x, point.y);
+                if (child.hasOwnProperty("frame")) {
+                    var outLine = child.frame.children[2];
+                    var framePoint = outLine.mapFromGlobal(point.x, point.y);
+                    if (outLine.contains(framePoint)) {
+                        return true;
+                    }
+                }
+
+                if (child.contains(mappedPoint)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     function setPinned(newPinned) {
@@ -378,7 +418,7 @@ FocusScope {
             return;
         }
 
-        var newRecommendedRectJS = (typeof Controller === "undefined") ? Qt.rect(0,0,0,0) : Controller.getRecommendedOverlayRect();
+        var newRecommendedRectJS = (typeof Controller === "undefined") ? Qt.rect(0,0,0,0) : Controller.getRecommendedHUDRect();
         var newRecommendedRect = Qt.rect(newRecommendedRectJS.x, newRecommendedRectJS.y,
                                 newRecommendedRectJS.width,
                                 newRecommendedRectJS.height);
@@ -410,7 +450,7 @@ FocusScope {
 
         var oldRecommendedRect = recommendedRect;
         var oldRecommendedDimmensions = { x: oldRecommendedRect.width, y: oldRecommendedRect.height };
-        var newRecommendedRect = Controller.getRecommendedOverlayRect();
+        var newRecommendedRect = Controller.getRecommendedHUDRect();
         var newRecommendedDimmensions = { x: newRecommendedRect.width, y: newRecommendedRect.height };
         repositionWindow(targetWindow, false, oldRecommendedRect, oldRecommendedDimmensions, newRecommendedRect, newRecommendedDimmensions);
     }
@@ -427,7 +467,7 @@ FocusScope {
             return;
         }
 
-        var recommended = Controller.getRecommendedOverlayRect();
+        var recommended = Controller.getRecommendedHUDRect();
         var maxX = recommended.x + recommended.width;
         var maxY = recommended.y + recommended.height;
         var newPosition = Qt.vector2d(targetWindow.x, targetWindow.y);

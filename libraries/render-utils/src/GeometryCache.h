@@ -147,6 +147,16 @@ public:
         NUM_SHAPES,
     };
 
+    /// @param entityShapeEnum:  The entity::Shape enumeration for the shape
+    ///           whose GeometryCache::Shape is desired.
+    /// @return GeometryCache::NUM_SHAPES in the event of an error; otherwise,
+    ///         the GeometryCache::Shape enum which aligns with the 
+    ///         specified entityShapeEnum
+    static GeometryCache::Shape getShapeForEntityShape(int entityShapeEnum);
+    static QString stringFromShape(GeometryCache::Shape geoShape);
+
+    static void computeSimpleHullPointListForShape(int entityShape, const glm::vec3 &entityExtents, QVector<glm::vec3> &outPointList);
+
     static uint8_t CUSTOM_PIPELINE_NUMBER;
     static render::ShapePipelinePointer shapePipelineFactory(const render::ShapePlumber& plumber, const render::ShapeKey& key);
     static void registerShapePipeline() {
@@ -161,16 +171,13 @@ public:
 
     // Bind the pipeline and get the state to render static geometry
     void bindSimpleProgram(gpu::Batch& batch, bool textured = false, bool transparent = false, bool culled = true,
-                                          bool unlit = false, bool depthBias = false);
+                                          bool unlit = false, bool depthBias = false, bool isAntiAliased = true);
     // Get the pipeline to render static geometry
     static gpu::PipelinePointer getSimplePipeline(bool textured = false, bool transparent = false, bool culled = true,
-                                          bool unlit = false, bool depthBias = false, bool fading = false);
+                                          bool unlit = false, bool depthBias = false, bool fading = false, bool isAntiAliased = true);
 
-    void bindOpaqueWebBrowserProgram(gpu::Batch& batch, bool isAA);
-    gpu::PipelinePointer getOpaqueWebBrowserProgram(bool isAA);
-
-    void bindTransparentWebBrowserProgram(gpu::Batch& batch, bool isAA);
-    gpu::PipelinePointer getTransparentWebBrowserProgram(bool isAA);
+    void bindWebBrowserProgram(gpu::Batch& batch, bool transparent = false);
+    gpu::PipelinePointer getWebBrowserProgram(bool transparent);
 
     static void initializeShapePipelines();
 
@@ -342,14 +349,10 @@ public:
     void useSimpleDrawPipeline(gpu::Batch& batch, bool noBlend = false);
 
     struct ShapeData {
-        size_t _indexOffset{ 0 };
-        size_t _indexCount{ 0 };
-        size_t _wireIndexOffset{ 0 };
-        size_t _wireIndexCount{ 0 };
-
         gpu::BufferView _positionView;
         gpu::BufferView _normalView;
-        gpu::BufferPointer _indices;
+        gpu::BufferView _indicesView;
+        gpu::BufferView _wireIndicesView;
 
         void setupVertices(gpu::BufferPointer& vertexBuffer, const geometry::VertexVector& vertices);
         void setupIndices(gpu::BufferPointer& indexBuffer, const geometry::IndexVector& indices, const geometry::IndexVector& wireIndices);
@@ -362,15 +365,21 @@ public:
 
     using VShape = std::array<ShapeData, NUM_SHAPES>;
 
-    VShape _shapes;
+    /// returns ShapeData associated with the specified shape,
+    /// otherwise nullptr in the event of an error.
+    const ShapeData * getShapeData(Shape shape) const;
 
 private:
+
     GeometryCache();
     virtual ~GeometryCache();
     void buildShapes();
 
     typedef QPair<int, int> IntPair;
     typedef QPair<unsigned int, unsigned int> VerticesIndices;
+    
+    
+    VShape _shapes;
 
     gpu::PipelinePointer _standardDrawPipeline;
     gpu::PipelinePointer _standardDrawPipelineNoBlend;
@@ -459,10 +468,8 @@ private:
     static QHash<SimpleProgramKey, gpu::PipelinePointer> _simplePrograms;
 
     gpu::ShaderPointer _simpleOpaqueWebBrowserShader;
-    gpu::PipelinePointer _simpleOpaqueWebBrowserPipeline;
     gpu::PipelinePointer _simpleOpaqueWebBrowserPipelineNoAA;
     gpu::ShaderPointer _simpleTransparentWebBrowserShader;
-    gpu::PipelinePointer _simpleTransparentWebBrowserPipeline;
     gpu::PipelinePointer _simpleTransparentWebBrowserPipelineNoAA;
 
     static render::ShapePipelinePointer getShapePipeline(bool textured = false, bool transparent = false, bool culled = true,

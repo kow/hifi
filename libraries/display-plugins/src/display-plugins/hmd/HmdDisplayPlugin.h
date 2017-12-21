@@ -27,13 +27,13 @@ public:
     bool isHmd() const override final { return true; }
     float getIPD() const override final { return _ipd; }
     glm::mat4 getEyeToHeadTransform(Eye eye) const override final { return _eyeOffsets[eye]; }
-    glm::mat4 getEyeProjection(Eye eye, const glm::mat4& baseProjection) const override final { return _eyeProjections[eye]; }
-    glm::mat4 getCullingProjection(const glm::mat4& baseProjection) const override final { return _cullingProjection; }
+    glm::mat4 getEyeProjection(Eye eye, const glm::mat4& baseProjection) const override { return _eyeProjections[eye]; }
+    glm::mat4 getCullingProjection(const glm::mat4& baseProjection) const override { return _cullingProjection; }
     glm::uvec2 getRecommendedUiSize() const override final;
     glm::uvec2 getRecommendedRenderSize() const override final { return _renderTargetSize; }
     bool isDisplayVisible() const override { return isHmdMounted(); }
 
-    QRect getRecommendedOverlayRect() const override final;
+    QRect getRecommendedHUDRect() const override final;
 
     virtual glm::mat4 getHeadPose() const override;
 
@@ -51,10 +51,9 @@ protected:
     virtual void postPreview() {};
     virtual void updatePresentPose();
 
-    bool beginFrameRender(uint32_t frameIndex) override;
     bool internalActivate() override;
     void internalDeactivate() override;
-    void compositeOverlay() override;
+    std::function<void(gpu::Batch&, const gpu::TexturePointer&, bool mirror)> getHUDOperator() override;
     void compositePointer() override;
     void internalPresent() override;
     void customizeContext() override;
@@ -87,13 +86,12 @@ private:
     ivec4 getViewportForSourceSize(const uvec2& size) const;
     float getLeftCenterPixel() const;
 
-    bool _disablePreviewItemAdded { false };
     bool _monoPreview { true };
     bool _clearPreviewFlag { false };
     gpu::TexturePointer _previewTexture;
     glm::vec2 _lastWindowSize;
 
-    struct OverlayRenderer {
+    struct HUDRenderer {
         gpu::Stream::FormatPointer format;
         gpu::BufferPointer vertices;
         gpu::BufferPointer indices;
@@ -101,12 +99,9 @@ private:
         gpu::PipelinePointer pipeline;
         int32_t uniformsLocation { -1 };
 
-        // FIXME this is stupid, use the built in transformation pipeline
-        std::array<gpu::BufferPointer, 2> uniformBuffers;
-        std::array<mat4, 2> mvps;
+        gpu::BufferPointer uniformsBuffer;
 
         struct Uniforms {
-            mat4 mvp;
             float alpha { 1.0f };
         } uniforms;
         
@@ -121,6 +116,6 @@ private:
 
         void build();
         void updatePipeline();
-        void render(HmdDisplayPlugin& plugin);
-    } _overlayRenderer;
+        std::function<void(gpu::Batch&, const gpu::TexturePointer&, bool mirror)> render(HmdDisplayPlugin& plugin);
+    } _hudRenderer;
 };

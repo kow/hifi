@@ -100,10 +100,21 @@ void HMDScriptingInterface::deactivateHMDHandMouse() {
 
 void  HMDScriptingInterface::closeTablet() {
     _showTablet = false;
+    _tabletContextualMode = false;
 }
 
-void HMDScriptingInterface::openTablet() {
+void HMDScriptingInterface::openTablet(bool contextualMode) {
     _showTablet = true;
+    _tabletContextualMode = contextualMode;
+}
+
+void HMDScriptingInterface::toggleShouldShowTablet() {
+    setShouldShowTablet(!getShouldShowTablet());
+}
+
+void HMDScriptingInterface::setShouldShowTablet(bool value) {
+    _showTablet = value;
+    _tabletContextualMode = false;
 }
 
 QScriptValue HMDScriptingInterface::getHUDLookAtPosition2D(QScriptContext* context, QScriptEngine* engine) {
@@ -151,7 +162,7 @@ glm::vec3 HMDScriptingInterface::getPosition() const {
 
 glm::quat HMDScriptingInterface::getOrientation() const {
     if (qApp->getActiveDisplayPlugin()->isHmd()) {
-        return glm::normalize(glm::quat_cast(getWorldHMDMatrix()));
+        return glmExtractRotation(getWorldHMDMatrix());
     }
     return glm::quat();
 }

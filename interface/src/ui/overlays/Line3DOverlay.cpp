@@ -33,8 +33,8 @@ Line3DOverlay::Line3DOverlay(const Line3DOverlay* line3DOverlay) :
     _length = line3DOverlay->getLength();
     _endParentID = line3DOverlay->getEndParentID();
     _endParentJointIndex = line3DOverlay->getEndJointIndex();
+    _lineWidth = line3DOverlay->getLineWidth();
     _glow = line3DOverlay->getGlow();
-    _glowWidth = line3DOverlay->getGlowWidth();
 }
 
 Line3DOverlay::~Line3DOverlay() {
@@ -45,7 +45,7 @@ Line3DOverlay::~Line3DOverlay() {
 }
 
 glm::vec3 Line3DOverlay::getStart() const {
-    return getPosition();
+    return getWorldPosition();
 }
 
 glm::vec3 Line3DOverlay::getEnd() const {
@@ -69,7 +69,7 @@ glm::vec3 Line3DOverlay::getEnd() const {
 }
 
 void Line3DOverlay::setStart(const glm::vec3& start) {
-    setPosition(start);
+    setWorldPosition(start);
 }
 
 void Line3DOverlay::setEnd(const glm::vec3& end) {
@@ -96,6 +96,7 @@ void Line3DOverlay::setEnd(const glm::vec3& end) {
     } else {
         _direction = glm::vec3(0.0f);
     }
+    notifyRenderVariableChange();
 }
 
 void Line3DOverlay::setLocalEnd(const glm::vec3& localEnd) {
@@ -122,7 +123,7 @@ AABox Line3DOverlay::getBounds() const {
 }
 
 void Line3DOverlay::render(RenderArgs* args) {
-    if (!_visible) {
+    if (!_renderVisible) {
         return; // do nothing if we're not visible
     }
 
@@ -133,8 +134,9 @@ void Line3DOverlay::render(RenderArgs* args) {
     auto batch = args->_batch;
     if (batch) {
         batch->setModelTransform(Transform());
-        glm::vec3 start = getStart();
-        glm::vec3 end = getEnd();
+        auto& renderTransform = getRenderTransform();
+        glm::vec3 start = renderTransform.getTranslation();
+        glm::vec3 end = renderTransform.transform(vec3(0.0, 0.0, -1.0));
 
         auto geometryCache = DependencyManager::get<GeometryCache>();
         if (getIsDashedLine()) {
@@ -143,7 +145,7 @@ void Line3DOverlay::render(RenderArgs* args) {
             geometryCache->renderDashedLine(*batch, start, end, colorv4, _geometryCacheID);
         } else {
             // renderGlowLine handles both glow = 0 and glow > 0 cases
-            geometryCache->renderGlowLine(*batch, start, end, colorv4, _glow, _glowWidth, _geometryCacheID);
+            geometryCache->renderGlowLine(*batch, start, end, colorv4, _glow, _lineWidth, _geometryCacheID);
         }
     }
 }
@@ -164,26 +166,36 @@ void Line3DOverlay::setProperties(const QVariantMap& originalProperties) {
     bool newEndSet { false };
 
     auto start = properties["start"];
-    // if "start" property was not there, check to see if they included aliases: startPoint
+    // If "start" property was not there, check to see if they included aliases: startPoint, p1
     if (!start.isValid()) {
         start = properties["startPoint"];
+    }
+    if (!start.isValid()) {
+        start = properties["p1"];
     }
     if (start.isValid()) {
         newStart = vec3FromVariant(start);
         newStartSet = true;
     }
     properties.remove("start"); // so that Base3DOverlay doesn't respond to it
+    properties.remove("startPoint");
+    properties.remove("p1");
 
     auto end = properties["end"];
-    // if "end" property was not there, check to see if they included aliases: endPoint
+    // If "end" property was not there, check to see if they included aliases: endPoint, p2
     if (!end.isValid()) {
         end = properties["endPoint"];
+    }
+    if (!end.isValid()) {
+        end = properties["p2"];
     }
     if (end.isValid()) {
         newEnd = vec3FromVariant(end);
         newEndSet = true;
     }
     properties.remove("end"); // so that Base3DOverlay doesn't respond to it
+    properties.remove("endPoint");
+    properties.remove("p2");
 
     auto length = properties["length"];
     if (length.isValid()) {
@@ -237,11 +249,10 @@ void Line3DOverlay::setProperties(const QVariantMap& originalProperties) {
         }
     }
 
-    auto glowWidth = properties["glowWidth"];
-    if (glowWidth.isValid()) {
-        setGlowWidth(glowWidth.toFloat());
+    auto lineWidth = properties["lineWidth"];
+    if (lineWidth.isValid()) {
+        setLineWidth(lineWidth.toFloat());
     }
-
 }
 
 QVariant Line3DOverlay::getProperty(const QString& property) {
@@ -251,14 +262,26 @@ QVariant Line3DOverlay::getProperty(const QString& property) {
     if (property == "end" || property == "endPoint" || property == "p2") {
         return vec3toVariant(getEnd());
     }
+    if (property == "length") {
+        return QVariant(getLength());
+    }
+    if (property == "endParentID") {
+        return _endParentID;
+    }
+    if (property == "endParentJointIndex") {
+        return _endParentJointIndex;
+    }
     if (property == "localStart") {
         return vec3toVariant(getLocalStart());
     }
     if (property == "localEnd") {
         return vec3toVariant(getLocalEnd());
     }
-    if (property == "length") {
-        return QVariant(getLength());
+    if (property == "glow") {
+        return getGlow();
+    }
+    if (property == "lineWidth") {
+        return _lineWidth;
     }
 
     return Base3DOverlay::getProperty(property);
@@ -266,4 +289,23 @@ QVariant Line3DOverlay::getProperty(const QString& property) {
 
 Line3DOverlay* Line3DOverlay::createClone() const {
     return new Line3DOverlay(this);
+}
+
+Transform Line3DOverlay::evalRenderTransform() {
+    // Capture start and endin the renderTransform:
+    // start is the origin
+    // end is at the tip of the front axis aka -Z
+    Transform transform;
+    transform.setTranslation( getStart());
+    auto endPos = getEnd();
+
+    auto vec = endPos - transform.getTranslation();
+    const float MIN_LINE_LENGTH = 0.0001f;
+    auto scale = glm::max(glm::length(vec), MIN_LINE_LENGTH);
+    auto dir = vec / scale;
+    auto orientation = glm::rotation(glm::vec3(0.0f, 0.0f, -1.0f), dir);
+    transform.setRotation(orientation);
+    transform.setScale(scale);
+
+    return transform;
 }

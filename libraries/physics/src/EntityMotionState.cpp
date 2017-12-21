@@ -92,6 +92,7 @@ void EntityMotionState::updateServerPhysicsVariables() {
 
     Transform localTransform;
     _entity->getLocalTransformAndVelocities(localTransform, _serverVelocity, _serverAngularVelocity);
+    _serverVariablesSet = true;
     _serverPosition = localTransform.getTranslation();
     _serverRotation = localTransform.getRotation();
     _serverAcceleration = _entity->getAcceleration();
@@ -99,18 +100,19 @@ void EntityMotionState::updateServerPhysicsVariables() {
 }
 
 void EntityMotionState::handleDeactivation() {
-    // copy _server data to entity
-    bool success;
-    _entity->setPosition(_serverPosition, success, false);
-    _entity->setOrientation(_serverRotation, success, false);
-    _entity->setVelocity(ENTITY_ITEM_ZERO_VEC3);
-    _entity->setAngularVelocity(ENTITY_ITEM_ZERO_VEC3);
-    // and also to RigidBody
-    btTransform worldTrans;
-    worldTrans.setOrigin(glmToBullet(_serverPosition));
-    worldTrans.setRotation(glmToBullet(_serverRotation));
-    _body->setWorldTransform(worldTrans);
-    // no need to update velocities... should already be zero
+    if (_serverVariablesSet) {
+        // copy _server data to entity
+        Transform localTransform = _entity->getLocalTransform();
+        localTransform.setTranslation(_serverPosition);
+        localTransform.setRotation(_serverRotation);
+        _entity->setLocalTransformAndVelocities(localTransform, ENTITY_ITEM_ZERO_VEC3, ENTITY_ITEM_ZERO_VEC3);
+        // and also to RigidBody
+        btTransform worldTrans;
+        worldTrans.setOrigin(glmToBullet(_entity->getWorldPosition()));
+        worldTrans.setRotation(glmToBullet(_entity->getWorldOrientation()));
+        _body->setWorldTransform(worldTrans);
+        // no need to update velocities... should already be zero
+    }
 }
 
 // virtual
@@ -123,7 +125,7 @@ void EntityMotionState::handleEasyChanges(uint32_t& flags) {
     if (flags & Simulation::DIRTY_SIMULATOR_ID) {
         if (_entity->getSimulatorID().isNull()) {
             // simulation ownership has been removed by an external simulator
-            if (glm::length2(_entity->getVelocity()) == 0.0f) {
+            if (glm::length2(_entity->getWorldVelocity()) == 0.0f) {
                 // this object is coming to rest --> clear the ACTIVATION flag and _outgoingPriority
                 flags &= ~Simulation::DIRTY_PHYSICS_ACTIVATION;
                 _body->setActivationState(WANTS_DEACTIVATION);
@@ -244,7 +246,7 @@ void EntityMotionState::getWorldTransform(btTransform& worldTrans) const {
         _accelerationNearlyGravityCount = (uint8_t)(-1);
     }
     worldTrans.setOrigin(glmToBullet(getObjectPosition()));
-    worldTrans.setRotation(glmToBullet(_entity->getRotation()));
+    worldTrans.setRotation(glmToBullet(_entity->getWorldOrientation()));
 }
 
 // This callback is invoked by the physics simulation at the end of each simulation step...
@@ -254,7 +256,7 @@ void EntityMotionState::setWorldTransform(const btTransform& worldTrans) {
     assert(entityTreeIsLocked());
     measureBodyAcceleration();
     bool positionSuccess;
-    _entity->setPosition(bulletToGLM(worldTrans.getOrigin()) + ObjectMotionState::getWorldOffset(), positionSuccess, false);
+    _entity->setWorldPosition(bulletToGLM(worldTrans.getOrigin()) + ObjectMotionState::getWorldOffset(), positionSuccess, false);
     if (!positionSuccess) {
         static QString repeatedMessage =
             LogHandler::getInstance().addRepeatedMessageRegex("EntityMotionState::setWorldTransform "
@@ -262,7 +264,7 @@ void EntityMotionState::setWorldTransform(const btTransform& worldTrans) {
         qCDebug(physics) << "EntityMotionState::setWorldTransform setPosition failed" << _entity->getID();
     }
     bool orientationSuccess;
-    _entity->setOrientation(bulletToGLM(worldTrans.getRotation()), orientationSuccess, false);
+    _entity->setWorldOrientation(bulletToGLM(worldTrans.getRotation()), orientationSuccess, false);
     if (!orientationSuccess) {
         static QString repeatedMessage =
             LogHandler::getInstance().addRepeatedMessageRegex("EntityMotionState::setWorldTransform "
@@ -339,6 +341,7 @@ bool EntityMotionState::remoteSimulationOutOfSync(uint32_t simulationStep) {
     // if we've never checked before, our _lastStep will be 0, and we need to initialize our state
     if (_lastStep == 0) {
         btTransform xform = _body->getWorldTransform();
+        _serverVariablesSet = true;
         _serverPosition = worldToLocal.transform(bulletToGLM(xform.getOrigin()));
         _serverRotation = worldToLocal.getRotation() * bulletToGLM(xform.getRotation());
         _serverVelocity = worldVelocityToLocal.transform(getBodyLinearVelocityGTSigma());
@@ -488,6 +491,10 @@ bool EntityMotionState::shouldSendUpdate(uint32_t simulationStep) {
         return true;
     }
 
+    if (_entity->shouldSuppressLocationEdits()) {
+        return false;
+    }
+
     if (!isLocallyOwned()) {
         // we don't own the simulation
 
@@ -535,8 +542,8 @@ void EntityMotionState::sendUpdate(OctreeEditPacketSender* packetSender, uint32_
             const float DYNAMIC_ANGULAR_VELOCITY_THRESHOLD = 0.087266f;  // ~5 deg/sec
 
             bool movingSlowlyLinear =
-                glm::length2(_entity->getVelocity()) < (DYNAMIC_LINEAR_VELOCITY_THRESHOLD * DYNAMIC_LINEAR_VELOCITY_THRESHOLD);
-            bool movingSlowlyAngular = glm::length2(_entity->getAngularVelocity()) <
+                glm::length2(_entity->getWorldVelocity()) < (DYNAMIC_LINEAR_VELOCITY_THRESHOLD * DYNAMIC_LINEAR_VELOCITY_THRESHOLD);
+            bool movingSlowlyAngular = glm::length2(_entity->getWorldAngularVelocity()) <
                     (DYNAMIC_ANGULAR_VELOCITY_THRESHOLD * DYNAMIC_ANGULAR_VELOCITY_THRESHOLD);
             bool movingSlowly = movingSlowlyLinear && movingSlowlyAngular && _entity->getAcceleration() == Vectors::ZERO;
 
@@ -574,7 +581,7 @@ void EntityMotionState::sendUpdate(OctreeEditPacketSender* packetSender, uint32_
     }
 
     if (properties.transformChanged()) {
-        if (_entity->checkAndMaybeUpdateQueryAACube()) {
+        if (_entity->updateQueryAACube()) {
             // due to parenting, the server may not know where something is in world-space, so include the bounding cube.
             properties.setQueryAACube(_entity->getQueryAACube());
         }
@@ -641,7 +648,7 @@ void EntityMotionState::sendUpdate(OctreeEditPacketSender* packetSender, uint32_
     _entity->forEachDescendant([&](SpatiallyNestablePointer descendant) {
         if (descendant->getNestableType() == NestableType::Entity) {
             EntityItemPointer entityDescendant = std::static_pointer_cast<EntityItem>(descendant);
-            if (descendant->checkAndMaybeUpdateQueryAACube()) {
+            if (descendant->updateQueryAACube()) {
                 EntityItemProperties newQueryCubeProperties;
                 newQueryCubeProperties.setQueryAACube(descendant->getQueryAACube());
                 newQueryCubeProperties.setLastEdited(properties.getLastEdited());
@@ -693,7 +700,7 @@ uint32_t EntityMotionState::getIncomingDirtyFlags() {
 void EntityMotionState::clearIncomingDirtyFlags() {
     assert(entityTreeIsLocked());
     if (_body && _entity) {
-        _entity->clearDirtyFlags();
+        _entity->clearDirtyFlags(DIRTY_PHYSICS_FLAGS);
     }
 }
 

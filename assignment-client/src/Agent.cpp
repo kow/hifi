@@ -354,15 +354,16 @@ void Agent::scriptRequestFinished() {
 
 
 void Agent::executeScript() {
-    _scriptEngine = std::unique_ptr<ScriptEngine>(new ScriptEngine(ScriptEngine::AGENT_SCRIPT, _scriptContents, _payload));
+    _scriptEngine = scriptEngineFactory(ScriptEngine::AGENT_SCRIPT, _scriptContents, _payload);
     _scriptEngine->setParent(this); // be the parent of the script engine so it gets moved when we do
 
-    DependencyManager::get<RecordingScriptingInterface>()->setScriptEngine(_scriptEngine.get());
+    DependencyManager::get<RecordingScriptingInterface>()->setScriptEngine(_scriptEngine);
 
     // setup an Avatar for the script to use
     auto scriptedAvatar = DependencyManager::get<ScriptableAvatar>();
 
-    connect(_scriptEngine.get(), SIGNAL(update(float)), scriptedAvatar.data(), SLOT(update(float)), Qt::ConnectionType::QueuedConnection);
+    connect(_scriptEngine.data(), SIGNAL(update(float)),
+            scriptedAvatar.data(), SLOT(update(float)), Qt::ConnectionType::QueuedConnection);
     scriptedAvatar->setForceFaceTrackerConnected(true);
 
     // call model URL setters with empty URLs so our avatar, if user, will have the default models
@@ -440,7 +441,7 @@ void Agent::executeScript() {
 
         Transform audioTransform;
         auto headOrientation = scriptedAvatar->getHeadOrientation();
-        audioTransform.setTranslation(scriptedAvatar->getPosition());
+        audioTransform.setTranslation(scriptedAvatar->getWorldPosition());
         audioTransform.setRotation(headOrientation);
 
         QByteArray encodedBuffer;
@@ -451,7 +452,7 @@ void Agent::executeScript() {
         }
 
         AbstractAudioInterface::emitAudioPacket(encodedBuffer.data(), encodedBuffer.size(), audioSequenceNumber,
-            audioTransform, scriptedAvatar->getPosition(), glm::vec3(0),
+            audioTransform, scriptedAvatar->getWorldPosition(), glm::vec3(0),
             packetType, _selectedCodecName);
     });
 
@@ -741,10 +742,10 @@ void Agent::processAgentAvatarAudio() {
             audioPacket->writePrimitive(numAvailableSamples);
 
             // use the orientation and position of this avatar for the source of this audio
-            audioPacket->writePrimitive(scriptedAvatar->getPosition());
+            audioPacket->writePrimitive(scriptedAvatar->getWorldPosition());
             glm::quat headOrientation = scriptedAvatar->getHeadOrientation();
             audioPacket->writePrimitive(headOrientation);
-            audioPacket->writePrimitive(scriptedAvatar->getPosition());
+            audioPacket->writePrimitive(scriptedAvatar->getWorldPosition());
             audioPacket->writePrimitive(glm::vec3(0));
 
             // no matter what, the loudness should be set to 0
@@ -758,10 +759,10 @@ void Agent::processAgentAvatarAudio() {
             audioPacket->writePrimitive((quint8)0);
 
             // use the orientation and position of this avatar for the source of this audio
-            audioPacket->writePrimitive(scriptedAvatar->getPosition());
+            audioPacket->writePrimitive(scriptedAvatar->getWorldPosition());
             glm::quat headOrientation = scriptedAvatar->getHeadOrientation();
             audioPacket->writePrimitive(headOrientation);
-            audioPacket->writePrimitive(scriptedAvatar->getPosition());
+            audioPacket->writePrimitive(scriptedAvatar->getWorldPosition()); // HUH? why do we write this twice??
             audioPacket->writePrimitive(glm::vec3(0));
 
             QByteArray encodedBuffer;

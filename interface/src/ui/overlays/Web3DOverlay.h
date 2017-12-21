@@ -19,8 +19,10 @@ class OffscreenQmlSurface;
 
 class Web3DOverlay : public Billboard3DOverlay {
     Q_OBJECT
+    using Parent = Billboard3DOverlay;
 
 public:
+
     static const QString QML;
     static QString const TYPE;
     virtual QString getType() const override { return TYPE; }
@@ -29,8 +31,6 @@ public:
     Web3DOverlay(const Web3DOverlay* Web3DOverlay);
     virtual ~Web3DOverlay();
 
-    QString pickURL();
-    void loadSourceURL();
     void setMaxFPS(uint8_t maxFPS);
     virtual void render(RenderArgs* args) override;
     virtual const render::ShapeKey getShapeKey() override;
@@ -39,7 +39,9 @@ public:
 
     QObject* getEventHandler();
     void setProxyWindow(QWindow* proxyWindow);
-    void handlePointerEvent(const PointerEvent& event);
+    Q_INVOKABLE void hoverEnterOverlay(const PointerEvent& event);
+    Q_INVOKABLE void hoverLeaveOverlay(const PointerEvent& event);
+    Q_INVOKABLE void handlePointerEvent(const PointerEvent& event);
     void handlePointerEventAsTouch(const PointerEvent& event);
     void handlePointerEventAsMouse(const PointerEvent& event);
 
@@ -49,8 +51,6 @@ public:
 
     void setProperties(const QVariantMap& properties) override;
     QVariant getProperty(const QString& property) override;
-
-    glm::vec2 getSize() const override;
 
     virtual bool findRayIntersection(const glm::vec3& origin, const glm::vec3& direction, float& distance,
         BoxFace& face, glm::vec3& surfaceNormal) override;
@@ -62,27 +62,39 @@ public:
         Mouse
     };
 
+    void buildWebSurface();
+    void destroyWebSurface();
+    void onResizeWebSurface();
+
+    Q_INVOKABLE unsigned int deviceIdByTouchPoint(qreal x, qreal y);
+
 public slots:
     void emitScriptEvent(const QVariant& scriptMessage);
 
 signals:
     void scriptEventReceived(const QVariant& message);
     void webEventReceived(const QVariant& message);
+    void resizeWebSurface();
+    void requestWebSurface();
+    void releaseWebSurface();
+
+protected:
+    Transform evalRenderTransform() override;
 
 private:
+    void setupQmlSurface();
+    void rebuildWebSurface();
+    bool isWebContent() const;
+
     InputMode _inputMode { Touch };
     QSharedPointer<OffscreenQmlSurface> _webSurface;
     gpu::TexturePointer _texture;
     QString _url;
     QString _scriptURL;
-    float _dpi;
-    vec2 _resolution{ 640, 480 };
+    float _dpi { 30.0f };
     int _geometryId { 0 };
-    bool _showKeyboardFocusHighlight{ true };
+    bool _showKeyboardFocusHighlight { true };
 
-    bool _pressed{ false };
-    bool _touchBeginAccepted { false };
-    std::map<uint32_t, QTouchEvent::TouchPoint> _activeTouchPoints;
     QTouchDevice _touchDevice;
 
     uint8_t _desiredMaxFPS { 10 };

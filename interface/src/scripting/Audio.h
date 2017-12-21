@@ -16,6 +16,7 @@
 #include "AudioDevices.h"
 #include "AudioEffectOptions.h"
 #include "SettingHandle.h"
+#include "AudioFileWav.h"
 
 namespace scripting {
 
@@ -50,10 +51,14 @@ public:
     void showMicMeter(bool show);
     void setInputVolume(float volume);
 
-    Q_INVOKABLE void setInputDevice(const QAudioDeviceInfo& device);
-    Q_INVOKABLE void setOutputDevice(const QAudioDeviceInfo& device);
+    Q_INVOKABLE void setInputDevice(const QAudioDeviceInfo& device, bool isHMD);
+    Q_INVOKABLE void setOutputDevice(const QAudioDeviceInfo& device, bool isHMD);
     Q_INVOKABLE void setReverb(bool enable);
     Q_INVOKABLE void setReverbOptions(const AudioEffectOptions* options);
+
+    Q_INVOKABLE bool startRecording(const QString& filename);
+    Q_INVOKABLE void stopRecording();
+    Q_INVOKABLE bool getRecording();
 
 signals:
     void nop();
@@ -83,7 +88,6 @@ private:
     bool _isMuted { false };
     bool _enableNoiseReduction { true };  // Match default value of AudioClient::_isNoiseGateEnabled.
     bool _contextIsHMD { false };
-
     AudioDevices* getDevices() { return &_devices; }
     AudioDevices _devices;
 };

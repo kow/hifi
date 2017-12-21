@@ -59,7 +59,7 @@ Circle3DOverlay::~Circle3DOverlay() {
     }
 }
 void Circle3DOverlay::render(RenderArgs* args) {
-    if (!_visible) {
+    if (!_renderVisible) {
         return; // do nothing if we're not visible
     }
 
@@ -84,11 +84,7 @@ void Circle3DOverlay::render(RenderArgs* args) {
         batch.setPipeline(args->_shapePipeline->pipeline);
     }
 
-    // FIXME: THe line width of _lineWidth is not supported anymore, we ll need a workaround
-
-    auto transform = getTransform();
-    transform.postScale(glm::vec3(getDimensions(), 1.0f));
-    batch.setModelTransform(transform);
+    batch.setModelTransform(getRenderTransform());
 
     // for our overlay, is solid means we draw a ring between the inner and outer radius of the circle, otherwise
     // we just draw a line...
@@ -263,11 +259,11 @@ void Circle3DOverlay::render(RenderArgs* args) {
 }
 
 const render::ShapeKey Circle3DOverlay::getShapeKey() {
-    auto builder = render::ShapeKey::Builder().withoutCullFace().withUnlit();
+    auto builder = render::ShapeKey::Builder().withoutCullFace();
     if (isTransparent()) {
         builder.withTranslucent();
     }
-    if (!getIsSolid() || shouldDrawHUDLayer()) {
+    if (!getIsSolid()) {
         builder.withUnlit().withDepthBias();
     }
     return builder.build();
@@ -419,11 +415,11 @@ bool Circle3DOverlay::findRayIntersection(const glm::vec3& origin, const glm::ve
 
     // Scale the dimensions by the diameter
     glm::vec2 dimensions = getOuterRadius() * 2.0f * getDimensions();
-    bool intersects = findRayRectangleIntersection(origin, direction, getRotation(), getPosition(), dimensions, distance);
+    bool intersects = findRayRectangleIntersection(origin, direction, getWorldOrientation(), getWorldPosition(), dimensions, distance);
 
     if (intersects) {
         glm::vec3 hitPosition = origin + (distance * direction);
-        glm::vec3 localHitPosition = glm::inverse(getRotation()) * (hitPosition - getPosition());
+        glm::vec3 localHitPosition = glm::inverse(getWorldOrientation()) * (hitPosition - getWorldPosition());
         localHitPosition.x /= getDimensions().x;
         localHitPosition.y /= getDimensions().y;
         float distanceToHit = glm::length(localHitPosition);

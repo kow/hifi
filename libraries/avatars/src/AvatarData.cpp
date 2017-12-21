@@ -91,6 +91,7 @@ AvatarData::AvatarData() :
     _targetVelocity(0.0f),
     _density(DEFAULT_AVATAR_DENSITY)
 {
+    connect(this, &AvatarData::lookAtSnappingChanged, this, &AvatarData::markIdentityDataChanged);
 }
 
 AvatarData::~AvatarData() {
@@ -102,7 +103,7 @@ AvatarData::~AvatarData() {
 QUrl AvatarData::_defaultFullAvatarModelUrl = {}; // In C++, if this initialization were in the AvatarInfo, every file would have it's own copy, even for class vars.
 const QUrl& AvatarData::defaultFullAvatarModelUrl() {
     if (_defaultFullAvatarModelUrl.isEmpty()) {
-        _defaultFullAvatarModelUrl = QUrl::fromLocalFile(PathUtils::resourcesPath() + "meshes/defaultAvatar_full.fst");
+        _defaultFullAvatarModelUrl = QUrl::fromLocalFile(PathUtils::resourcesPath() + "/meshes/defaultAvatar_full.fst");
     }
     return _defaultFullAvatarModelUrl;
 }
@@ -116,13 +117,62 @@ void AvatarData::setTargetScale(float targetScale) {
     }
 }
 
+float AvatarData::getDomainLimitedScale() const {
+    if (canMeasureEyeHeight()) {
+        const float minScale = getDomainMinScale();
+        const float maxScale = getDomainMaxScale();
+        return glm::clamp(_targetScale, minScale, maxScale);
+    } else {
+        // We can't make a good estimate.
+        return _targetScale;
+    }
+}
+
+void AvatarData::setDomainMinimumHeight(float domainMinimumHeight) {
+    _domainMinimumHeight = glm::clamp(domainMinimumHeight, MIN_AVATAR_HEIGHT, MAX_AVATAR_HEIGHT);
+}
+
+void AvatarData::setDomainMaximumHeight(float domainMaximumHeight) {
+    _domainMaximumHeight = glm::clamp(domainMaximumHeight, MIN_AVATAR_HEIGHT, MAX_AVATAR_HEIGHT);
+}
+
+float AvatarData::getDomainMinScale() const {
+    float unscaledHeight = getUnscaledHeight();
+    const float EPSILON = 1.0e-4f;
+    if (unscaledHeight <= EPSILON) {
+        unscaledHeight = DEFAULT_AVATAR_HEIGHT;
+    }
+    return _domainMinimumHeight / unscaledHeight;
+}
+
+float AvatarData::getDomainMaxScale() const {
+    float unscaledHeight = getUnscaledHeight();
+    const float EPSILON = 1.0e-4f;
+    if (unscaledHeight <= EPSILON) {
+        unscaledHeight = DEFAULT_AVATAR_HEIGHT;
+    }
+    return _domainMaximumHeight / unscaledHeight;
+}
+
+float AvatarData::getUnscaledHeight() const {
+    const float eyeHeight = getUnscaledEyeHeight();
+    const float ratio = eyeHeight / DEFAULT_AVATAR_HEIGHT;
+    return eyeHeight + ratio * DEFAULT_AVATAR_EYE_TO_TOP_OF_HEAD;
+}
+
+float AvatarData::getHeight() const {
+    const float eyeHeight = getEyeHeight();
+    const float ratio = eyeHeight / DEFAULT_AVATAR_HEIGHT;
+    return eyeHeight + ratio * DEFAULT_AVATAR_EYE_TO_TOP_OF_HEAD;
+}
+
 glm::vec3 AvatarData::getHandPosition() const {
-    return getOrientation() * _handPosition + getPosition();
+    return getWorldOrientation() * _handPosition + getWorldPosition();
 }
 
 void AvatarData::setHandPosition(const glm::vec3& handPosition) {
     // store relative to position/orientation
-    _handPosition = glm::inverse(getOrientation()) * (handPosition - getPosition());
+    _handPosition = glm::inverse(getWorldOrientation()) * (handPosition - getWorldPosition());
 }
 
 void AvatarData::lazyInitHeadData() const {
@@ -1173,10 +1223,6 @@ void AvatarData::setJointData(int index, const glm::quat& rotation, const glm::v
     if (index == -1) {
         return;
     }
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "setJointData", Q_ARG(int, index), Q_ARG(const glm::quat&, rotation));
-        return;
-    }
     QWriteLocker writeLock(&_jointDataLock);
     if (_jointData.size() <= index) {
         _jointData.resize(index + 1);
@@ -1192,27 +1238,19 @@ void AvatarData::clearJointData(int index) {
     if (index == -1) {
         return;
     }
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "clearJointData", Q_ARG(int, index));
-        return;
-    }
     QWriteLocker writeLock(&_jointDataLock);
     // FIXME: I don't understand how this "clears" the joint data at index
     if (_jointData.size() <= index) {
         _jointData.resize(index + 1);
     }
+    _jointData[index] = {};
 }
 
 bool AvatarData::isJointDataValid(int index) const {
     if (index == -1) {
         return false;
     }
-    if (QThread::currentThread() != thread()) {
-        bool result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "isJointDataValid", 
-            Q_RETURN_ARG(bool, result), Q_ARG(int, index));
-        return result;
-    }
+    QReadLocker readLock(&_jointDataLock);
     return index < _jointData.size();
 }
 
@@ -1220,73 +1258,61 @@ glm::quat AvatarData::getJointRotation(int index) const {
     if (index == -1) {
         return glm::quat();
     }
-    if (QThread::currentThread() != thread()) {
-        glm::quat result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "getJointRotation", 
-            Q_RETURN_ARG(glm::quat, result), Q_ARG(int, index));
-        return result;
-    }
     QReadLocker readLock(&_jointDataLock);
     return index < _jointData.size() ? _jointData.at(index).rotation : glm::quat();
 }
 
-
 glm::vec3 AvatarData::getJointTranslation(int index) const {
     if (index == -1) {
         return glm::vec3();
-    }
-    if (QThread::currentThread() != thread()) {
-        glm::vec3 result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "getJointTranslation", 
-            Q_RETURN_ARG(glm::vec3, result), Q_ARG(int, index));
-        return result;
     }
     QReadLocker readLock(&_jointDataLock);
     return index < _jointData.size() ? _jointData.at(index).translation : glm::vec3();
 }
 
 glm::vec3 AvatarData::getJointTranslation(const QString& name) const {
-    if (QThread::currentThread() != thread()) {
-        glm::vec3 result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "getJointTranslation", 
-            Q_RETURN_ARG(glm::vec3, result), Q_ARG(const QString&, name));
-        return result;
-    }
-    return getJointTranslation(getJointIndex(name));
+    // Can't do this, because the lock needs to cover the entire set of logic.  In theory, the joints could change 
+    // on another thread in between the call to getJointIndex and getJointTranslation
+    // return getJointTranslation(getJointIndex(name));
+    return readLockWithNamedJointIndex<glm::vec3>(name, [this](int index) {
+        return _jointData.at(index).translation;
+    });
 }
 
 void AvatarData::setJointData(const QString& name, const glm::quat& rotation, const glm::vec3& translation) {
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "setJointData", Q_ARG(const QString&, name), Q_ARG(const glm::quat&, rotation),
-            Q_ARG(const glm::vec3&, translation));
-        return;
-    }
-    setJointData(getJointIndex(name), rotation, translation);
+    // Can't do this, not thread safe
+    // setJointData(getJointIndex(name), rotation, translation);
+
+    writeLockWithNamedJointIndex(name, [&](int index) {
+        auto& jointData = _jointData[index];
+        jointData.rotation = rotation;
+        jointData.translation = translation;
+        jointData.rotationSet = jointData.translationSet = true;
+    });
 }
 
 void AvatarData::setJointRotation(const QString& name, const glm::quat& rotation) {
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "setJointRotation", Q_ARG(const QString&, name), Q_ARG(const glm::quat&, rotation));
-        return;
-    }
-    setJointRotation(getJointIndex(name), rotation);
+    // Can't do this, not thread safe
+    // setJointRotation(getJointIndex(name), rotation);
+    writeLockWithNamedJointIndex(name, [&](int index) {
+        auto& data = _jointData[index];
+        data.rotation = rotation;
+        data.rotationSet = true;
+    });
 }
 
 void AvatarData::setJointTranslation(const QString& name, const glm::vec3& translation) {
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "setJointTranslation", Q_ARG(const QString&, name),
-            Q_ARG(const glm::vec3&, translation));
-        return;
-    }
-    setJointTranslation(getJointIndex(name), translation);
+    // Can't do this, not thread safe
+    // setJointTranslation(getJointIndex(name), translation);
+    writeLockWithNamedJointIndex(name, [&](int index) {
+        auto& data = _jointData[index];
+        data.translation = translation;
+        data.translationSet = true;
+    });
 }
 
 void AvatarData::setJointRotation(int index, const glm::quat& rotation) {
     if (index == -1) {
-        return;
-    }
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "setJointRotation", Q_ARG(int, index), Q_ARG(const glm::quat&, rotation));
         return;
     }
     QWriteLocker writeLock(&_jointDataLock);
@@ -1302,10 +1328,6 @@ void AvatarData::setJointTranslation(int index, const glm::vec3& translation) {
     if (index == -1) {
         return;
     }
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "setJointTranslation", Q_ARG(int, index), Q_ARG(const glm::vec3&, translation));
-        return;
-    }
     QWriteLocker writeLock(&_jointDataLock);
     if (_jointData.size() <= index) {
         _jointData.resize(index + 1);
@@ -1316,31 +1338,32 @@ void AvatarData::setJointTranslation(int index, const glm::vec3& translation) {
 }
 
 void AvatarData::clearJointData(const QString& name) {
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "clearJointData", Q_ARG(const QString&, name));
-        return;
-    }
-    clearJointData(getJointIndex(name));
+    // Can't do this, not thread safe
+    // clearJointData(getJointIndex(name));
+    writeLockWithNamedJointIndex(name, [&](int index) {
+        _jointData[index] = {};
+    });
 }
 
 bool AvatarData::isJointDataValid(const QString& name) const {
-    if (QThread::currentThread() != thread()) {
-        bool result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "isJointDataValid", 
-            Q_RETURN_ARG(bool, result), Q_ARG(const QString&, name));
-        return result;
-    }
-    return isJointDataValid(getJointIndex(name));
+    // Can't do this, not thread safe
+    // return isJointDataValid(getJointIndex(name));
+
+    return readLockWithNamedJointIndex<bool>(name, false, [&](int index) {
+        // This is technically superfluous....  the lambda is only called if index is a valid 
+        // offset for _jointData.  Nevertheless, it would be confusing to leave the lamdba as
+        // `return true`
+        return index < _jointData.size();
+    });
 }
 
 glm::quat AvatarData::getJointRotation(const QString& name) const {
-    if (QThread::currentThread() != thread()) {
-        glm::quat result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "getJointRotation", 
-            Q_RETURN_ARG(glm::quat, result), Q_ARG(const QString&, name));
-        return result;
-    }
-    return getJointRotation(getJointIndex(name));
+    // Can't do this, not thread safe
+    // return getJointRotation(getJointIndex(name));
+
+    return readLockWithNamedJointIndex<glm::quat>(name, [&](int index) {
+        return _jointData.at(index).rotation;
+    });
 }
 
 QVector<glm::quat> AvatarData::getJointRotations() const {
@@ -1358,30 +1381,20 @@ QVector<glm::quat> AvatarData::getJointRotations() const {
     return jointRotations;
 }
 
-void AvatarData::setJointRotations(QVector<glm::quat> jointRotations) {
-    if (QThread::currentThread() != thread()) {
-        QVector<glm::quat> result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "setJointRotations",
-                                  Q_ARG(QVector<glm::quat>, jointRotations));
-    }
+void AvatarData::setJointRotations(const QVector<glm::quat>& jointRotations) {
     QWriteLocker writeLock(&_jointDataLock);
-    if (_jointData.size() < jointRotations.size()) {
-        _jointData.resize(jointRotations.size());
+    auto size = jointRotations.size();
+    if (_jointData.size() < size) {
+        _jointData.resize(size);
     }
-    for (int i = 0; i < jointRotations.size(); ++i) {
-        if (i < _jointData.size()) {
-            setJointRotation(i, jointRotations[i]);
-        }
+    for (int i = 0; i < size; ++i) {
+        auto& data = _jointData[i];
+        data.rotation = jointRotations[i];
+        data.rotationSet = true;
     }
 }
 
 QVector<glm::vec3> AvatarData::getJointTranslations() const {
-    if (QThread::currentThread() != thread()) {
-        QVector<glm::vec3> result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "getJointTranslations",
-                                  Q_RETURN_ARG(QVector<glm::vec3>, result));
-        return result;
-    }
     QReadLocker readLock(&_jointDataLock);
     QVector<glm::vec3> jointTranslations(_jointData.size());
     for (int i = 0; i < _jointData.size(); ++i) {
@@ -1390,29 +1403,24 @@ QVector<glm::vec3> AvatarData::getJointTranslations() const {
     return jointTranslations;
 }
 
-void AvatarData::setJointTranslations(QVector<glm::vec3> jointTranslations) {
-    if (QThread::currentThread() != thread()) {
-        QVector<glm::quat> result;
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "setJointTranslations",
-                                  Q_ARG(QVector<glm::vec3>, jointTranslations));
-    }
+void AvatarData::setJointTranslations(const QVector<glm::vec3>& jointTranslations) {
     QWriteLocker writeLock(&_jointDataLock);
-    if (_jointData.size() < jointTranslations.size()) {
-        _jointData.resize(jointTranslations.size());
+    auto size = jointTranslations.size();
+    if (_jointData.size() < size) {
+        _jointData.resize(size);
     }
-    for (int i = 0; i < jointTranslations.size(); ++i) {
-        if (i < _jointData.size()) {
-            setJointTranslation(i, jointTranslations[i]);
-        }
+    for (int i = 0; i < size; ++i) {
+        auto& data = _jointData[i];
+        data.translation = jointTranslations[i];
+        data.translationSet = true;
     }
 }
 
 void AvatarData::clearJointsData() {
-    // FIXME: this method is terribly inefficient and probably doesn't even work
-    // (see implementation of clearJointData(index))
-    for (int i = 0; i < _jointData.size(); ++i) {
-        clearJointData(i);
-    }
+    QWriteLocker writeLock(&_jointDataLock);
+    QVector<JointData> newJointData;
+    newJointData.resize(_jointData.size());
+    _jointData.swap(newJointData);
 }
 
 int AvatarData::getFauxJointIndex(const QString& name) const {
@@ -1488,7 +1496,9 @@ void AvatarData::processAvatarIdentity(const QByteArray& identityData, bool& ide
             >> identity.displayName
             >> identity.sessionDisplayName
             >> identity.isReplicated
-            >> identity.avatarEntityData;
+            >> identity.avatarEntityData
+            >> identity.lookAtSnappingEnabled
+        ;
 
         // set the store identity sequence number to match the incoming identity
         _identitySequenceNumber = incomingSequenceNumber;
@@ -1530,6 +1540,11 @@ void AvatarData::processAvatarIdentity(const QByteArray& identityData, bool& ide
             identityChanged = true;
         }
 
+    if (identity.lookAtSnappingEnabled != _lookAtSnappingEnabled) {
+        setProperty("lookAtSnappingEnabled", identity.lookAtSnappingEnabled);
+        identityChanged = true;
+    }
+
 #ifdef WANT_DEBUG
         qCDebug(avatars) << __FUNCTION__
             << "identity.uuid:" << identity.uuid
@@ -1561,7 +1576,9 @@ QByteArray AvatarData::identityByteArray(bool setIsReplicated) const {
             << _displayName
             << getSessionDisplayNameForTransport() // depends on _sessionDisplayName
             << (_isReplicated || setIsReplicated)
-            << _avatarEntityData;
+            << _avatarEntityData
+            << _lookAtSnappingEnabled
+        ;
     });
 
     return identityData;
@@ -1932,8 +1949,8 @@ void registerAvatarTypes(QScriptEngine* engine) {
 void AvatarData::setRecordingBasis(std::shared_ptr<Transform> recordingBasis) {
     if (!recordingBasis) {
         recordingBasis = std::make_shared<Transform>();
-        recordingBasis->setRotation(getOrientation());
-        recordingBasis->setTranslation(getPosition());
+        recordingBasis->setRotation(getWorldOrientation());
+        recordingBasis->setTranslation(getWorldPosition());
         // TODO: find a  different way to record/playback the Scale of the avatar
         //recordingBasis->setScale(getTargetScale());
     }
@@ -2091,14 +2108,14 @@ void AvatarData::fromJson(const QJsonObject& json, bool useFrameSkeleton) {
 
         auto relativeTransform = Transform::fromJson(json[JSON_AVATAR_RELATIVE]);
         auto worldTransform = currentBasis->worldTransform(relativeTransform);
-        setPosition(worldTransform.getTranslation());
+        setWorldPosition(worldTransform.getTranslation());
         orientation = worldTransform.getRotation();
     } else {
         // We still set the position in the case that there is no movement.
-        setPosition(currentBasis->getTranslation());
+        setWorldPosition(currentBasis->getTranslation());
         orientation = currentBasis->getRotation();
     }
-    setOrientation(orientation);
+    setWorldOrientation(orientation);
     updateAttitude(orientation);
 
     // Do after avatar orientation because head look-at needs avatar orientation.
@@ -2185,44 +2202,44 @@ void AvatarData::fromFrame(const QByteArray& frameData, AvatarData& result, bool
 }
 
 float AvatarData::getBodyYaw() const {
-    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getOrientation()));
+    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getWorldOrientation()));
     return eulerAngles.y;
 }
 
 void AvatarData::setBodyYaw(float bodyYaw) {
-    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getOrientation()));
+    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getWorldOrientation()));
     eulerAngles.y = bodyYaw;
-    setOrientation(glm::quat(glm::radians(eulerAngles)));
+    setWorldOrientation(glm::quat(glm::radians(eulerAngles)));
 }
 
 float AvatarData::getBodyPitch() const {
-    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getOrientation()));
+    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getWorldOrientation()));
     return eulerAngles.x;
 }
 
 void AvatarData::setBodyPitch(float bodyPitch) {
-    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getOrientation()));
+    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getWorldOrientation()));
     eulerAngles.x = bodyPitch;
-    setOrientation(glm::quat(glm::radians(eulerAngles)));
+    setWorldOrientation(glm::quat(glm::radians(eulerAngles)));
 }
 
 float AvatarData::getBodyRoll() const {
-    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getOrientation()));
+    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getWorldOrientation()));
     return eulerAngles.z;
 }
 
 void AvatarData::setBodyRoll(float bodyRoll) {
-    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getOrientation()));
+    glm::vec3 eulerAngles = glm::degrees(safeEulerAngles(getWorldOrientation()));
     eulerAngles.z = bodyRoll;
-    setOrientation(glm::quat(glm::radians(eulerAngles)));
+    setWorldOrientation(glm::quat(glm::radians(eulerAngles)));
 }
 
 void AvatarData::setPositionViaScript(const glm::vec3& position) {
-    SpatiallyNestable::setPosition(position);
+    SpatiallyNestable::setWorldPosition(position);
 }
 
 void AvatarData::setOrientationViaScript(const glm::quat& orientation) {
-    SpatiallyNestable::setOrientation(orientation);
+    SpatiallyNestable::setWorldOrientation(orientation);
 }
 
 glm::quat AvatarData::getAbsoluteJointRotationInObjectFrame(int index) const {
@@ -2255,11 +2272,13 @@ glm::vec3 variantToVec3(const QVariant& var) {
     return result;
 }
 
-void AttachmentData::fromVariant(const QVariant& variant) {
+bool AttachmentData::fromVariant(const QVariant& variant) {
+    bool isValid = false;
     auto map = variant.toMap();
     if (map.contains("modelUrl")) {
         auto urlString = map["modelUrl"].toString();
         modelURL = urlString;
+        isValid = true;
     }
     if (map.contains("jointName")) {
         jointName = map["jointName"].toString();
@@ -2276,6 +2295,7 @@ void AttachmentData::fromVariant(const QVariant& variant) {
     if (map.contains("soft")) {
         isSoft = map["soft"].toBool();
     }
+    return isValid;
 }
 
 QVariantList AvatarData::getAttachmentsVariant() const {
@@ -2291,8 +2311,7 @@ void AvatarData::setAttachmentsVariant(const QVariantList& variant) {
     newAttachments.reserve(variant.size());
     for (const auto& attachmentVar : variant) {
         AttachmentData attachment;
-        attachment.fromVariant(attachmentVar);
-        if (!attachment.modelURL.isEmpty()) {
+        if (attachment.fromVariant(attachmentVar)) {
             newAttachments.append(attachment);
         }
     }
@@ -2302,10 +2321,6 @@ void AvatarData::setAttachmentsVariant(const QVariantList& variant) {
 const int MAX_NUM_AVATAR_ENTITIES = 42;
 
 void AvatarData::updateAvatarEntity(const QUuid& entityID, const QByteArray& entityData) {
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "updateAvatarEntity", Q_ARG(const QUuid&, entityID), Q_ARG(QByteArray, entityData));
-        return;
-    }
     _avatarEntitiesLock.withWriteLock([&] {
         AvatarEntityMap::iterator itr = _avatarEntityData.find(entityID);
         if (itr == _avatarEntityData.end()) {
@@ -2323,11 +2338,6 @@ void AvatarData::updateAvatarEntity(const QUuid& entityID, const QByteArray& ent
 }
 
 void AvatarData::clearAvatarEntity(const QUuid& entityID) {
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "clearAvatarEntity", Q_ARG(const QUuid&, entityID));
-        return;
-    }
-
     _avatarEntitiesLock.withWriteLock([&] {
         _avatarEntityData.remove(entityID);
         _avatarEntityDataLocallyEdited = true;
@@ -2337,12 +2347,6 @@ void AvatarData::clearAvatarEntity(const QUuid& entityID) {
 
 AvatarEntityMap AvatarData::getAvatarEntityData() const {
     AvatarEntityMap result;
-    if (QThread::currentThread() != thread()) {
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "getAvatarEntityData",
-                                  Q_RETURN_ARG(AvatarEntityMap, result));
-        return result;
-    }
-
     _avatarEntitiesLock.withReadLock([&] {
         result = _avatarEntityData;
     });
@@ -2359,10 +2363,6 @@ void AvatarData::setAvatarEntityData(const AvatarEntityMap& avatarEntityData) {
     if (avatarEntityData.size() > MAX_NUM_AVATAR_ENTITIES) {
         // the data is suspect
         qCDebug(avatars) << "discard suspect AvatarEntityData with size =" << avatarEntityData.size();
-        return;
-    }
-    if (QThread::currentThread() != thread()) {
-        QMetaObject::invokeMethod(this, "setAvatarEntityData", Q_ARG(const AvatarEntityMap&, avatarEntityData));
         return;
     }
     _avatarEntitiesLock.withWriteLock([&] {
@@ -2384,11 +2384,6 @@ void AvatarData::setAvatarEntityData(const AvatarEntityMap& avatarEntityData) {
 
 AvatarEntityIDs AvatarData::getAndClearRecentlyDetachedIDs() {
     AvatarEntityIDs result;
-    if (QThread::currentThread() != thread()) {
-        BLOCKING_INVOKE_METHOD(const_cast<AvatarData*>(this), "getAndClearRecentlyDetachedIDs",
-                                  Q_RETURN_ARG(AvatarEntityIDs, result));
-        return result;
-    }
     _avatarEntitiesLock.withWriteLock([&] {
         result = _avatarEntityDetached;
         _avatarEntityDetached.clear();
@@ -2399,6 +2394,11 @@ AvatarEntityIDs AvatarData::getAndClearRecentlyDetachedIDs() {
 // thread-safe
 glm::mat4 AvatarData::getSensorToWorldMatrix() const {
     return _sensorToWorldMatrixCache.get();
+}
+
+// thread-safe
+float AvatarData::getSensorToWorldScale() const {
+    return extractUniformScale(_sensorToWorldMatrixCache.get());
 }
 
 // thread-safe
@@ -2436,62 +2436,9 @@ void RayToAvatarIntersectionResultFromScriptValue(const QScriptValue& object, Ra
 
 const float AvatarData::OUT_OF_VIEW_PENALTY = -10.0f;
 
-float AvatarData::_avatarSortCoefficientSize { 0.5f };
+float AvatarData::_avatarSortCoefficientSize { 1.0f };
 float AvatarData::_avatarSortCoefficientCenter { 0.25 };
 float AvatarData::_avatarSortCoefficientAge { 1.0f };
-
-void AvatarData::sortAvatars(
-        QList<AvatarSharedPointer> avatarList,
-        const ViewFrustum& cameraView,
-        std::priority_queue<AvatarPriority>& sortedAvatarsOut,
-        std::function<uint64_t(AvatarSharedPointer)> getLastUpdated,
-        std::function<float(AvatarSharedPointer)> getBoundingRadius,
-        std::function<bool(AvatarSharedPointer)> shouldIgnore) {
-
-    PROFILE_RANGE(simulation, "sort");
-    uint64_t now = usecTimestampNow();
-
-    glm::vec3 frustumCenter = cameraView.getPosition();
-    const glm::vec3& forward = cameraView.getDirection();
-    for (int32_t i = 0; i < avatarList.size(); ++i) {
-        const auto& avatar = avatarList.at(i);
-
-        if (shouldIgnore(avatar)) {
-            continue;
-        }
-
-        // priority = weighted linear combination of:
-        //   (a) apparentSize
-        //   (b) proximity to center of view
-        //   (c) time since last update
-        glm::vec3 avatarPosition = avatar->getPosition();
-        glm::vec3 offset = avatarPosition - frustumCenter;
-        float distance = glm::length(offset) + 0.001f; // add 1mm to avoid divide by zero
-
-        // FIXME - AvatarData has something equivolent to this
-        float radius = getBoundingRadius(avatar);
-
-        float apparentSize = 2.0f * radius / distance;
-        float cosineAngle = glm::dot(offset, forward) / distance;
-        float age = (float)(now - getLastUpdated(avatar)) / (float)(USECS_PER_SECOND);
-
-        // NOTE: we are adding values of different units to get a single measure of "priority".
-        // Thus we multiply each component by a conversion "weight" that scales its units relative to the others.
-        // These weights are pure magic tuning and should be hard coded in the relation below,
-        // but are currently exposed for anyone who would like to explore fine tuning:
-        float priority = _avatarSortCoefficientSize * apparentSize
-            + _avatarSortCoefficientCenter * cosineAngle
-            + _avatarSortCoefficientAge * age;
-
-        // decrement priority of avatars outside keyhole
-        if (distance > cameraView.getCenterRadius()) {
-            if (!cameraView.sphereIntersectsFrustum(avatarPosition, radius)) {
-                priority += OUT_OF_VIEW_PENALTY;
-            }
-        }
-        sortedAvatarsOut.push(AvatarPriority(avatar, priority));
-    }
-}
 
 QScriptValue AvatarEntityMapToScriptValue(QScriptEngine* engine, const AvatarEntityMap& value) {
     QScriptValue obj = engine->newObject();

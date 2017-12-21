@@ -74,6 +74,7 @@ public:
 
     void setModelTransform(const Transform& transform) { _modelTransform = transform; }
     const Transform& getModelTransform() const { return _modelTransform; }
+    glm::mat4 getUiTransform() const;
 
     float getAlpha() const { return _alpha; }
     void setAlpha(float alpha) { if (alpha != _alpha) { emit alphaChanged();  _alpha = alpha; } }
@@ -109,7 +110,10 @@ public:
     void setReticleOverDesktop(bool value) { _isOverDesktop = value; }
 
     void setDisplayPlugin(const DisplayPluginPointer& displayPlugin) { _currentDisplayPlugin = displayPlugin; }
-    void setFrameInfo(uint32_t frame, const glm::mat4& camera) { _currentCamera = camera; }
+    void setFrameInfo(uint32_t frame, const glm::mat4& camera, const glm::mat4& sensorToWorldMatrix) {
+        _currentCamera = camera;
+        _sensorToWorldMatrix = sensorToWorldMatrix;
+    }
 
 signals:
     void allowMouseCaptureChanged();
@@ -119,11 +123,11 @@ protected slots:
     void sendFakeMouseEvent();
 
 private:
-    glm::mat4 getUiTransform() const;
     void updateTooltips();
 
     DisplayPluginPointer _currentDisplayPlugin;
     glm::mat4 _currentCamera;
+    glm::mat4 _sensorToWorldMatrix;
     QWidget* _renderingWidget{ nullptr };
 
     //// Support for hovering and tooltips
@@ -176,6 +180,7 @@ class ReticleInterface : public QObject {
     Q_PROPERTY(QVariant position READ getPosition WRITE setPosition)
     Q_PROPERTY(bool visible READ getVisible WRITE setVisible)
     Q_PROPERTY(float depth READ getDepth WRITE setDepth)
+    Q_PROPERTY(float scale READ getScale WRITE setScale)
     Q_PROPERTY(glm::vec2 maximumPosition READ getMaximumPosition)
     Q_PROPERTY(bool mouseCaptured READ isMouseCaptured)
     Q_PROPERTY(bool allowMouseCapture READ getAllowMouseCapture WRITE setAllowMouseCapture)
@@ -196,6 +201,9 @@ public:
 
     Q_INVOKABLE float getDepth() { return _compositor->getReticleDepth(); }
     Q_INVOKABLE void setDepth(float depth) { _compositor->setReticleDepth(depth); }
+
+    Q_INVOKABLE float getScale() const;
+    Q_INVOKABLE void setScale(float scale);
 
     Q_INVOKABLE QVariant getPosition() const;
     Q_INVOKABLE void setPosition(QVariant position);

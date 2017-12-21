@@ -32,6 +32,8 @@ Rectangle {
 
     color: hifi.colors.baseGray
 
+    property bool keyboardEnabled: HMD.active
+    property bool keyboardRaised: false
 
     LetterboxMessage {
         id: letterBoxMessage
@@ -380,7 +382,7 @@ Rectangle {
                     Component.onCompleted: scriptsModel.filterRegExp = new RegExp("^.*$", "i")
                     onActiveFocusChanged: {
                         // raise the keyboard
-                        keyboard.raised = activeFocus;
+                        root.keyboardRaised = activeFocus;
 
                         // scroll to the bottom of the content area.
                         if (activeFocus) {
@@ -400,6 +402,17 @@ Rectangle {
                     colorScheme: hifi.colorSchemes.dark
                     anchors.left: parent.left
                     anchors.right: parent.right
+
+                    TableViewColumn {
+                        role: "display";
+                    }
+
+                    onActivated: {
+                        var path = scriptsModel.data(index, 0x100)
+                        if (path) {
+                            loadScript(path)
+                        }
+                    }
                 }
 
                 HifiControls.VerticalSpacer {
@@ -416,9 +429,9 @@ Rectangle {
                     readOnly: true
 
                     Connections {
-                        target: treeView
+                        target: treeView.selection
                         onCurrentIndexChanged: {
-                            var path = scriptsModel.data(treeView.currentIndex, 0x100)
+                            var path = scriptsModel.data(treeView.selection.currentIndex, 0x100)
                             if (path) {
                                 selectedScript.text = path
                             } else {
@@ -470,7 +483,7 @@ Rectangle {
 
     HifiControls.Keyboard {
         id: keyboard
-        raised: false
+        raised: parent.keyboardEnabled && parent.keyboardRaised
         numeric: false
         anchors {
             bottom: parent.bottom

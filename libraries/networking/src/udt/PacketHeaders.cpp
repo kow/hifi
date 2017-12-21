@@ -30,18 +30,22 @@ PacketVersion versionForPacketType(PacketType packetType) {
         case PacketType::EntityEdit:
         case PacketType::EntityData:
         case PacketType::EntityPhysics:
-            return VERSION_ENTITIES_HAS_SHOULD_HIGHLIGHT;
+            return static_cast<PacketVersion>(EntityVersion::HazeEffect);
+
         case PacketType::EntityQuery:
-            return static_cast<PacketVersion>(EntityQueryPacketVersion::JSONFilterWithFamilyTree);
+            return static_cast<PacketVersion>(EntityQueryPacketVersion::ConnectionIdentifier);
         case PacketType::AvatarIdentity:
         case PacketType::AvatarData:
         case PacketType::BulkAvatarData:
         case PacketType::KillAvatar:
-            return static_cast<PacketVersion>(AvatarMixerPacketVersion::IsReplicatedInAvatarIdentity);
+            return static_cast<PacketVersion>(AvatarMixerPacketVersion::UpdatedMannequinDefaultAvatar);
         case PacketType::MessagesData:
             return static_cast<PacketVersion>(MessageDataVersion::TextOrBinaryData);
         case PacketType::ICEServerHeartbeat:
             return 18; // ICE Server Heartbeat signing
+        case PacketType::AssetMappingOperation:
+        case PacketType::AssetMappingOperationReply:
+            return static_cast<PacketVersion>(AssetServerPacketVersion::RedirectedMappings);
         case PacketType::AssetGetInfo:
         case PacketType::AssetGet:
         case PacketType::AssetUpload:
@@ -53,10 +57,13 @@ PacketVersion versionForPacketType(PacketType packetType) {
             return static_cast<PacketVersion>(DomainConnectionDeniedVersion::IncludesExtraInfo);
 
         case PacketType::DomainConnectRequest:
-            return static_cast<PacketVersion>(DomainConnectRequestVersion::HasMachineFingerprint);
+            return static_cast<PacketVersion>(DomainConnectRequestVersion::AlwaysHasMachineFingerprint);
 
         case PacketType::DomainServerAddedNode:
             return static_cast<PacketVersion>(DomainServerAddedNodeVersion::PermissionsGrid);
+
+        case PacketType::EntityScriptCallMethod:
+            return static_cast<PacketVersion>(EntityScriptCallMethodVersion::ClientCallable);
 
         case PacketType::MixedAudio:
         case PacketType::SilentAudioFrame:
@@ -65,7 +72,10 @@ PacketVersion versionForPacketType(PacketType packetType) {
         case PacketType::MicrophoneAudioWithEcho:
         case PacketType::AudioStreamStats:
             return static_cast<PacketVersion>(AudioVersion::HighDynamicRangeVolume);
-
+        case PacketType::ICEPing:
+            return static_cast<PacketVersion>(IcePingVersion::SendICEPeerID);
+        case PacketType::DomainSettings:
+            return 18;  // replace min_avatar_scale and max_avatar_scale with min_avatar_height and max_avatar_height
         default:
             return 17;
     }

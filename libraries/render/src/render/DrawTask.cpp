@@ -9,6 +9,8 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 
+#include <LogHandler.h>
+
 #include "DrawTask.h"
 #include "Logging.h"
 
@@ -18,7 +20,7 @@
 #include <PerfStat.h>
 #include <ViewFrustum.h>
 #include <gpu/Context.h>
-
+#include <gpu/StandardShaderLib.h>
 
 #include <drawItemBounds_vert.h>
 #include <drawItemBounds_frag.h>
@@ -48,12 +50,14 @@ void renderShape(RenderArgs* args, const ShapePlumberPointer& shapeContext, cons
         if (args->_shapePipeline) {
             args->_shapePipeline->prepareShapeItem(args, key, item);
             item.render(args);
-        } 
+        }
         args->_shapePipeline = nullptr;
     } else if (key.hasOwnPipeline()) {
         item.render(args);
     } else {
         qCDebug(renderlogging) << "Item could not be rendered with invalid key" << key;
+        static QString repeatedCouldNotBeRendered = LogHandler::getInstance().addRepeatedMessageRegex(
+            "Item could not be rendered with invalid key.*");
     }
     args->_itemShapeKey = 0;
 }
@@ -62,7 +66,7 @@ void render::renderShapes(const RenderContextPointer& renderContext,
     const ShapePlumberPointer& shapeContext, const ItemBounds& inItems, int maxDrawnItems, const ShapeKey& globalKey) {
     auto& scene = renderContext->_scene;
     RenderArgs* args = renderContext->args;
-    
+
     int numItemsToDraw = (int)inItems.size();
     if (maxDrawnItems != -1) {
         numItemsToDraw = glm::min(numItemsToDraw, maxDrawnItems);
@@ -104,6 +108,8 @@ void render::renderStateSortShapes(const RenderContextPointer& renderContext,
             } else if (key.hasOwnPipeline()) {
                 ownPipelineBucket.push_back( std::make_tuple(item, key) );
             } else {
+                static QString repeatedCouldNotBeRendered = LogHandler::getInstance().addRepeatedMessageRegex(
+                    "Item could not be rendered with invalid key.*");
                 qCDebug(renderlogging) << "Item could not be rendered with invalid key" << key;
             }
         }
@@ -113,7 +119,7 @@ void render::renderStateSortShapes(const RenderContextPointer& renderContext,
     for (auto& pipelineKey : sortedPipelines) {
         auto& bucket = sortedShapes[pipelineKey];
         args->_shapePipeline = shapeContext->pickPipeline(args, pipelineKey);
-        if (!args->_shapePipeline) {            
+        if (!args->_shapePipeline) {
             continue;
         }
         args->_itemShapeKey = pipelineKey._flags.to_ulong();
@@ -182,7 +188,7 @@ void DrawBounds::run(const RenderContextPointer& renderContext,
     if (!_drawBuffer) {
         _drawBuffer = std::make_shared<gpu::Buffer>(sizeOfItemBound);
     }
-    
+
     _drawBuffer->setData(numItems * sizeOfItemBound, (const gpu::Byte*) items.data());
 
     gpu::doInBatch(args->_context, [&](gpu::Batch& batch) {
@@ -209,3 +215,85 @@ void DrawBounds::run(const RenderContextPointer& renderContext,
     });
 }
 
+gpu::PipelinePointer DrawFrustum::_pipeline;
+gpu::BufferView DrawFrustum::_frustumMeshIndices;
+
+DrawFrustum::DrawFrustum(const glm::vec3& color) :
+    _color{ color } {
+    _frustumMeshVertices = gpu::BufferView(std::make_shared<gpu::Buffer>(sizeof(glm::vec3) * 8, nullptr), gpu::Element::VEC3F_XYZ);
+    _frustumMeshStream.addBuffer(_frustumMeshVertices._buffer, _frustumMeshVertices._offset, _frustumMeshVertices._stride);
+}
+
+void DrawFrustum::configure(const Config& configuration) {
+    _updateFrustum = !configuration.isFrozen;
+}
+
+void DrawFrustum::run(const render::RenderContextPointer& renderContext, const Input& input) {
+    assert(renderContext->args);
+    assert(renderContext->args->_context);
+
+    RenderArgs* args = renderContext->args;
+    if (input) {
+        const auto& frustum = *input;
+
+        static uint8_t indexData[] = { 0, 1, 2, 3, 0, 4, 5, 6, 7, 4, 5, 1, 2, 6, 7, 3 };
+
+        if (!_frustumMeshIndices._buffer) {
+            auto indices = std::make_shared<gpu::Buffer>(sizeof(indexData), indexData);
+            _frustumMeshIndices = gpu::BufferView(indices, gpu::Element(gpu::SCALAR, gpu::UINT8, gpu::INDEX));
+        }
+
+        if (!_pipeline) {
+            auto vs = gpu::StandardShaderLib::getDrawTransformVertexPositionVS();
+            auto ps = gpu::StandardShaderLib::getDrawColorPS();
+            gpu::ShaderPointer program = gpu::Shader::createProgram(vs, ps);
+
+            gpu::Shader::BindingSet slotBindings;
+            slotBindings.insert(gpu::Shader::Binding("color", 0));
+            gpu::Shader::makeProgram(*program, slotBindings);
+
+            gpu::StatePointer state = gpu::StatePointer(new gpu::State());
+            state->setDepthTest(gpu::State::DepthTest(true, false));
+            _pipeline = gpu::Pipeline::create(program, state);
+        }
+
+        if (_updateFrustum) {
+            updateFrustum(frustum);
+        }
+
+        // Render the frustums in wireframe
+        gpu::doInBatch(args->_context, [&](gpu::Batch& batch) {
+            args->_batch = &batch;
+            batch.setViewportTransform(args->_viewport);
+            batch.setStateScissorRect(args->_viewport);
+
+            glm::mat4 projMat;
+            Transform viewMat;
+            args->getViewFrustum().evalProjectionMatrix(projMat);
+            args->getViewFrustum().evalViewTransform(viewMat);
+
+            batch.setProjectionTransform(projMat);
+            batch.setViewTransform(viewMat);
+            batch.setPipeline(_pipeline);
+            batch.setIndexBuffer(_frustumMeshIndices);
+
+            batch._glUniform4f(0, _color.x, _color.y, _color.z, 1.0f);
+            batch.setInputStream(0, _frustumMeshStream);
+            batch.drawIndexed(gpu::LINE_STRIP, sizeof(indexData) / sizeof(indexData[0]), 0U);
+
+            args->_batch = nullptr;
+        });
+    }
+}
+
+void DrawFrustum::updateFrustum(const ViewFrustum& frustum) {
+    auto& vertices = _frustumMeshVertices.edit<std::array<glm::vec3, 8U> >();
+    vertices[0] = frustum.getNearTopLeft();
+    vertices[1] = frustum.getNearTopRight();
+    vertices[2] = frustum.getNearBottomRight();
+    vertices[3] = frustum.getNearBottomLeft();
+    vertices[4] = frustum.getFarTopLeft();
+    vertices[5] = frustum.getFarTopRight();
+    vertices[6] = frustum.getFarBottomRight();
+    vertices[7] = frustum.getFarBottomLeft();
+}

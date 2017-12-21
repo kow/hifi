@@ -6,6 +6,7 @@
 //  See the accompanying file LICENSE or http://www.apache.org/licenses/LICENSE-2.0.html
 //
 #include "OffscreenQmlSurface.h"
+#include "ImageProvider.h"
 
 // Has to come before Qt GL includes
 #include <gl/Config.h>
@@ -23,7 +24,11 @@
 #include <QtCore/QThread>
 #include <QtCore/QMutex>
 #include <QtCore/QWaitCondition>
+#include <QtMultimedia/QMediaService>
+#include <QtMultimedia/QAudioOutputSelectorControl>
+#include <QtMultimedia/QMediaPlayer>
 
+#include <AudioClient.h>
 #include <shared/NsightHelpers.h>
 #include <shared/GlobalAppProperties.h>
 #include <shared/QtHelpers.h>
@@ -40,6 +45,7 @@
 #include <gl/OffscreenGLCanvas.h>
 #include <gl/GLHelpers.h>
 #include <gl/Context.h>
+#include <shared/ReadWriteLockable.h>
 
 #include "types/FileTypeProfile.h"
 #include "types/HFWebEngineProfile.h"
@@ -50,6 +56,53 @@
 Q_LOGGING_CATEGORY(trace_render_qml, "trace.render.qml")
 Q_LOGGING_CATEGORY(trace_render_qml_gl, "trace.render.qml.gl")
 Q_LOGGING_CATEGORY(offscreenFocus, "hifi.offscreen.focus")
+
+
+class OffscreenQmlWhitelist : public Dependency, private ReadWriteLockable {
+    SINGLETON_DEPENDENCY
+
+public:
+
+    void addWhitelistContextHandler(const std::initializer_list<QUrl>& urls, const QmlContextCallback& callback) {
+        withWriteLock([&] {
+            for (const auto& url : urls) {
+                _callbacks[url].push_back(callback);
+            }
+        });
+    }
+
+    QList<QmlContextCallback> getCallbacksForUrl(const QUrl& url) const {
+        return resultWithReadLock<QList<QmlContextCallback>>([&] {
+            QList<QmlContextCallback> result;
+            auto itr = _callbacks.find(url);
+            if (_callbacks.end() != itr) {
+                result = *itr;
+            }
+            return result;
+        });
+    }
+
+private:
+    
+    QHash<QUrl, QList<QmlContextCallback>> _callbacks;
+};
+
+QSharedPointer<OffscreenQmlWhitelist> getQmlWhitelist() {
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        DependencyManager::set<OffscreenQmlWhitelist>();
+    });
+
+    return DependencyManager::get<OffscreenQmlWhitelist>();
+}
+
+
+void OffscreenQmlSurface::addWhitelistContextHandler(const std::initializer_list<QUrl>& urls, const QmlContextCallback& callback) {
+    getQmlWhitelist()->addWhitelistContextHandler(urls, callback);
+}
+
+
+QmlContextCallback OffscreenQmlSurface::DEFAULT_CONTEXT_CALLBACK = [](QQmlContext*, QObject*) {};
 
 struct TextureSet {
     // The number of surfaces with this size
@@ -63,6 +116,64 @@ uint64_t uvec2ToUint64(const uvec2& v) {
     result |= v.y;
     return result;
 }
+
+// Class to handle changing QML audio output device using another thread
+class AudioHandler : public QObject, QRunnable {
+    Q_OBJECT
+public:
+    AudioHandler(QSharedPointer<OffscreenQmlSurface> surface, const QString& deviceName, QObject* parent = nullptr) : QObject(parent) {
+        _newTargetDevice = deviceName;
+        _surface = surface;
+        setAutoDelete(true);
+        if (deviceName.size() > 0) {
+            QThreadPool::globalInstance()->start(this);
+        }
+    }
+    virtual ~AudioHandler() {
+        qDebug() << "Audio Handler Destroyed";
+    }
+    void run() override {
+        if (!_surface.isNull() && _surface->getRootItem() && !_surface->getCleaned()) {
+            for (auto player : _surface->getRootItem()->findChildren<QMediaPlayer*>()) {
+                auto mediaState = player->state();
+                QMediaService *svc = player->service();
+                if (nullptr == svc) {
+                    return;
+                }
+                QAudioOutputSelectorControl *out = qobject_cast<QAudioOutputSelectorControl *>
+                    (svc->requestControl(QAudioOutputSelectorControl_iid));
+                if (nullptr == out) {
+                    return;
+                }
+                QString deviceOuput;
+                auto outputs = out->availableOutputs();
+                for (int i = 0; i < outputs.size(); i++) {
+                    QString output = outputs[i];
+                    QString description = out->outputDescription(output);
+                    if (description == _newTargetDevice) {
+                        deviceOuput = output;
+                        break;
+                    }
+                }
+                out->setActiveOutput(deviceOuput);
+                svc->releaseControl(out);
+                // if multimedia was paused, it will start playing automatically after changing audio device
+                // this will reset it back to a paused state
+                if (mediaState == QMediaPlayer::State::PausedState) {
+                    player->pause();
+                }
+                else if (mediaState == QMediaPlayer::State::StoppedState) {
+                    player->stop();
+                }
+            }
+        }
+        qDebug() << "QML Audio changed to " << _newTargetDevice;
+    }
+
+private:
+    QString _newTargetDevice;
+    QSharedPointer<OffscreenQmlSurface> _surface;
+};
 
 class OffscreenTextures {
 public:
@@ -184,7 +295,7 @@ private:
             GLuint texture = textureAndFence.first;
             uvec2 size = _textureSizes[texture];
             auto sizeKey = uvec2ToUint64(size);
-            // Textures can be returned after all surfaces of the given size have been destroyed, 
+            // Textures can be returned after all surfaces of the given size have been destroyed,
             // in which case we just destroy the texture
             if (!_textures.count(sizeKey)) {
                 destroy(textureAndFence);
@@ -210,12 +321,12 @@ class UrlHandler : public QObject {
 public:
     Q_INVOKABLE bool canHandleUrl(const QString& url) {
         static auto handler = dynamic_cast<AbstractUriHandler*>(qApp);
-        return handler->canAcceptURL(url);
+        return handler && handler->canAcceptURL(url);
     }
 
     Q_INVOKABLE bool handleUrl(const QString& url) {
         static auto handler = dynamic_cast<AbstractUriHandler*>(qApp);
-        return handler->acceptURL(url);
+        return handler && handler->acceptURL(url);
     }
 };
 
@@ -296,6 +407,7 @@ private:
 };
 
 
+
 #define SINGLE_QML_ENGINE 0
 
 #if SINGLE_QML_ENGINE
@@ -304,6 +416,9 @@ static size_t globalEngineRefCount{ 0 };
 #endif
 
 void initializeQmlEngine(QQmlEngine* engine, QQuickWindow* window) {
+    // register the pixmap image provider (used only for security image, for now)
+    engine->addImageProvider(ImageProvider::PROVIDER_NAME, new ImageProvider());
+
     engine->setNetworkAccessManagerFactory(new QmlNetworkAccessManagerFactory);
     auto importList = engine->importPathList();
     importList.insert(importList.begin(), PathUtils::resourcesPath());
@@ -372,7 +487,17 @@ void releaseEngine(QQmlEngine* engine) {
 #endif
 }
 
+#define OFFSCREEN_QML_SHARED_CONTEXT_PROPERTY "com.highfidelity.qml.gl.sharedContext"
+void OffscreenQmlSurface::setSharedContext(QOpenGLContext* sharedContext) {
+    qApp->setProperty(OFFSCREEN_QML_SHARED_CONTEXT_PROPERTY, QVariant::fromValue<void*>(sharedContext));
+}
+
+QOpenGLContext* OffscreenQmlSurface::getSharedContext() {
+    return static_cast<QOpenGLContext*>(qApp->property(OFFSCREEN_QML_SHARED_CONTEXT_PROPERTY).value<void*>());
+}
+
 void OffscreenQmlSurface::cleanup() {
+    _isCleaned = true;
     _canvas->makeCurrent();
 
     _renderControl->invalidate();
@@ -393,9 +518,9 @@ void OffscreenQmlSurface::cleanup() {
 }
 
 void OffscreenQmlSurface::render() {
-#ifdef HIFI_ENABLE_NSIGHT_DEBUG
-    return;
-#endif
+    if (nsightActive()) {
+        return;
+    }
     if (_paused) {
         return;
     }
@@ -454,8 +579,8 @@ std::function<void(uint32_t, void*)> OffscreenQmlSurface::getDiscardLambda() {
 }
 
 bool OffscreenQmlSurface::allowNewFrame(uint8_t fps) {
-    // If we already have a pending texture, don't render another one 
-    // i.e. don't render faster than the consumer context, since it wastes 
+    // If we already have a pending texture, don't render another one
+    // i.e. don't render faster than the consumer context, since it wastes
     // GPU cycles on producing output that will never be seen
     if (0 != _latestTextureAndFence.first) {
         return false;
@@ -471,6 +596,7 @@ OffscreenQmlSurface::OffscreenQmlSurface() {
 
 OffscreenQmlSurface::~OffscreenQmlSurface() {
     QObject::disconnect(&_updateTimer);
+    disconnectAudioOutputTimer();
     QObject::disconnect(qApp);
 
     cleanup();
@@ -484,9 +610,18 @@ OffscreenQmlSurface::~OffscreenQmlSurface() {
 void OffscreenQmlSurface::onAboutToQuit() {
     _paused = true;
     QObject::disconnect(&_updateTimer);
+    disconnectAudioOutputTimer();
+    
 }
 
-void OffscreenQmlSurface::create(QOpenGLContext* shareContext) {
+void OffscreenQmlSurface::disconnectAudioOutputTimer() {
+    if (_audioOutputUpdateTimer.isActive()) {
+        _audioOutputUpdateTimer.stop();
+    }
+    QObject::disconnect(&_audioOutputUpdateTimer);
+}
+
+void OffscreenQmlSurface::create() {
     qCDebug(uiLogging) << "Building QML surface";
 
     _renderControl = new QMyQuickRenderControl();
@@ -507,15 +642,22 @@ void OffscreenQmlSurface::create(QOpenGLContext* shareContext) {
     _renderControl->_renderWindow = _proxyWindow;
 
     _canvas = new OffscreenGLCanvas();
-    if (!_canvas->create(shareContext)) {
+    if (!_canvas->create(getSharedContext())) {
         qFatal("Failed to create OffscreenGLCanvas");
         return;
     };
 
     connect(_quickWindow, &QQuickWindow::focusObjectChanged, this, &OffscreenQmlSurface::onFocusObjectChanged);
 
+    // acquireEngine interrogates the GL context, so we need to have the context current here
+    if (!_canvas->makeCurrent()) {
+        qFatal("Failed to make context current for QML Renderer");
+        return;
+    }
+    
     // Create a QML engine.
     auto qmlEngine = acquireEngine(_quickWindow);
+
     _qmlContext = new QQmlContext(qmlEngine->rootContext());
 
     _qmlContext->setContextProperty("offscreenWindow", QVariant::fromValue(getWindow()));
@@ -525,12 +667,23 @@ void OffscreenQmlSurface::create(QOpenGLContext* shareContext) {
     // FIXME Compatibility mechanism for existing HTML and JS that uses eventBridgeWrapper
     // Find a way to flag older scripts using this mechanism and wanr that this is deprecated
     _qmlContext->setContextProperty("eventBridgeWrapper", new EventBridgeWrapper(this, _qmlContext));
-
-    if (!_canvas->makeCurrent()) {
-        qWarning("Failed to make context current for QML Renderer");
-        return;
-    }
     _renderControl->initialize(_canvas->getContext());
+    
+    // Connect with the audio client and listen for audio device changes
+    auto audioIO = DependencyManager::get<AudioClient>();
+    connect(audioIO.data(), &AudioClient::deviceChanged, this, [&](QAudio::Mode mode, const QAudioDeviceInfo& device) {
+        if (mode == QAudio::Mode::AudioOutput) {
+            QMetaObject::invokeMethod(this, "changeAudioOutputDevice", Qt::QueuedConnection, Q_ARG(QString, device.deviceName()));
+        }
+    });
+
+    // Setup the update of the QML media components with the current audio output device
+    QObject::connect(&_audioOutputUpdateTimer, &QTimer::timeout, this, [this]() {
+        new AudioHandler(sharedFromThis(), _currentAudioOutputDevice);
+    });
+    int waitForAudioQmlMs = 200;
+    _audioOutputUpdateTimer.setInterval(waitForAudioQmlMs);
+    _audioOutputUpdateTimer.setSingleShot(true);
 
     // When Quick says there is a need to render, we will not render immediately. Instead,
     // a timer with a small interval is used to get better performance.
@@ -539,6 +692,33 @@ void OffscreenQmlSurface::create(QOpenGLContext* shareContext) {
     _updateTimer.setTimerType(Qt::PreciseTimer);
     _updateTimer.setInterval(MIN_TIMER_MS); // 5ms, Qt::PreciseTimer required
     _updateTimer.start();
+}
+
+void OffscreenQmlSurface::changeAudioOutputDevice(const QString& deviceName, bool isHtmlUpdate) {
+    if (_rootItem != nullptr && !isHtmlUpdate) {
+        QMetaObject::invokeMethod(this, "forceQmlAudioOutputDeviceUpdate", Qt::QueuedConnection);
+    }
+    emit audioOutputDeviceChanged(deviceName);
+}
+
+void OffscreenQmlSurface::forceHtmlAudioOutputDeviceUpdate() {
+    auto audioIO = DependencyManager::get<AudioClient>();
+    QString deviceName = audioIO->getActiveAudioDevice(QAudio::AudioOutput).deviceName();
+    QMetaObject::invokeMethod(this, "changeAudioOutputDevice", Qt::QueuedConnection,
+        Q_ARG(QString, deviceName), Q_ARG(bool, true));
+}
+
+void OffscreenQmlSurface::forceQmlAudioOutputDeviceUpdate() {
+    if (QThread::currentThread() != qApp->thread()) {
+        QMetaObject::invokeMethod(this, "forceQmlAudioOutputDeviceUpdate", Qt::QueuedConnection);
+    } else {
+        auto audioIO = DependencyManager::get<AudioClient>();
+        _currentAudioOutputDevice = audioIO->getActiveAudioDevice(QAudio::AudioOutput).deviceName();
+        if (_audioOutputUpdateTimer.isActive()) {
+            _audioOutputUpdateTimer.stop();
+        }
+        _audioOutputUpdateTimer.start();
+    }
 }
 
 static uvec2 clampSize(const uvec2& size, uint32_t maxDimension) {
@@ -624,18 +804,26 @@ void OffscreenQmlSurface::setBaseUrl(const QUrl& baseUrl) {
     _qmlContext->setBaseUrl(baseUrl);
 }
 
-QObject* OffscreenQmlSurface::load(const QUrl& qmlSource, bool createNewContext, std::function<void(QQmlContext*, QObject*)> f) {
+void OffscreenQmlSurface::load(const QUrl& qmlSource, bool createNewContext, const QmlContextCallback& onQmlLoadedCallback) {
     if (QThread::currentThread() != thread()) {
         qCWarning(uiLogging) << "Called load on a non-surface thread";
     }
     // Synchronous loading may take a while; restart the deadlock timer
     QMetaObject::invokeMethod(qApp, "updateHeartbeat", Qt::DirectConnection);
 
+    // Get any whitelist functionality
+    QList<QmlContextCallback> callbacks = getQmlWhitelist()->getCallbacksForUrl(qmlSource);
+    // If we have whitelisted content, we must load a new context
+    createNewContext |= !callbacks.empty();
+    callbacks.push_back(onQmlLoadedCallback);
+
     QQmlContext* targetContext = _qmlContext;
     if (_rootItem && createNewContext) {
         targetContext = new QQmlContext(targetContext);
     }
 
+
+    // FIXME eliminate loading of relative file paths for QML
     QUrl finalQmlSource = qmlSource;
     if ((qmlSource.isRelative() && !qmlSource.isEmpty()) || qmlSource.scheme() == QLatin1String("file")) {
         finalQmlSource = _qmlContext->resolvedUrl(qmlSource);
@@ -643,38 +831,40 @@ QObject* OffscreenQmlSurface::load(const QUrl& qmlSource, bool createNewContext,
 
     auto qmlComponent = new QQmlComponent(_qmlContext->engine(), finalQmlSource, QQmlComponent::PreferSynchronous);
     if (qmlComponent->isLoading()) {
-        connect(qmlComponent, &QQmlComponent::statusChanged, this,
-            [this, qmlComponent, targetContext, f](QQmlComponent::Status) {
-            finishQmlLoad(qmlComponent, targetContext, f);
+        connect(qmlComponent, &QQmlComponent::statusChanged, this, [=](QQmlComponent::Status) { 
+            finishQmlLoad(qmlComponent, targetContext, callbacks);
         });
-        return nullptr;
+        return;
     }
 
-    return finishQmlLoad(qmlComponent, targetContext, f);
+    finishQmlLoad(qmlComponent, targetContext, callbacks);
 }
 
-QObject* OffscreenQmlSurface::loadInNewContext(const QUrl& qmlSource, std::function<void(QQmlContext*, QObject*)> f) {
-    return load(qmlSource, true, f);
+void OffscreenQmlSurface::loadInNewContext(const QUrl& qmlSource, const QmlContextCallback& onQmlLoadedCallback) {
+    load(qmlSource, true, onQmlLoadedCallback);
 }
 
-QObject* OffscreenQmlSurface::load(const QUrl& qmlSource, std::function<void(QQmlContext*, QObject*)> f) {
-    return load(qmlSource, false, f);
+void OffscreenQmlSurface::load(const QUrl& qmlSource, const QmlContextCallback& onQmlLoadedCallback) {
+    load(qmlSource, false, onQmlLoadedCallback);
+}
+
+void OffscreenQmlSurface::load(const QString& qmlSourceFile, const QmlContextCallback& onQmlLoadedCallback)  {
+    return load(QUrl(qmlSourceFile), onQmlLoadedCallback);
 }
 
 void OffscreenQmlSurface::clearCache() {
     _qmlContext->engine()->clearComponentCache();
 }
 
-QObject* OffscreenQmlSurface::finishQmlLoad(QQmlComponent* qmlComponent, QQmlContext* qmlContext, std::function<void(QQmlContext*, QObject*)> f) {
+void OffscreenQmlSurface::finishQmlLoad(QQmlComponent* qmlComponent, QQmlContext* qmlContext, const QList<QmlContextCallback>& callbacks) {
     disconnect(qmlComponent, &QQmlComponent::statusChanged, this, 0);
     if (qmlComponent->isError()) {
         for (const auto& error : qmlComponent->errors()) {
             qCWarning(uiLogging) << error.url() << error.line() << error;
         }
         qmlComponent->deleteLater();
-        return nullptr;
+        return;
     }
-
 
     QObject* newObject = qmlComponent->beginCreate(qmlContext);
     if (qmlComponent->isError()) {
@@ -685,11 +875,26 @@ QObject* OffscreenQmlSurface::finishQmlLoad(QQmlComponent* qmlComponent, QQmlCon
             qFatal("Unable to finish loading QML root");
         }
         qmlComponent->deleteLater();
-        return nullptr;
+        return;
     }
 
     qmlContext->engine()->setObjectOwnership(this, QQmlEngine::CppOwnership);
-    f(qmlContext, newObject);
+
+    // All quick items should be focusable
+    QQuickItem* newItem = qobject_cast<QQuickItem*>(newObject);
+    if (newItem) {
+        // Make sure we make items focusable (critical for
+        // supporting keyboard shortcuts)
+        newItem->setFlag(QQuickItem::ItemIsFocusScope, true);
+    }
+
+    // Make sure we will call callback for this codepath
+    // Call this before qmlComponent->completeCreate() otherwise ghost window appears
+    if (newItem && _rootItem) {
+        for (const auto& callback : callbacks) {
+            callback(qmlContext, newObject);
+        }
+    }
 
     QObject* eventBridge = qmlContext->contextProperty("eventBridge").value<QObject*>();
     if (qmlContext != _qmlContext && eventBridge && eventBridge != this) {
@@ -701,29 +906,21 @@ QObject* OffscreenQmlSurface::finishQmlLoad(QQmlComponent* qmlComponent, QQmlCon
     qmlComponent->completeCreate();
     qmlComponent->deleteLater();
 
-
-    // All quick items should be focusable
-    QQuickItem* newItem = qobject_cast<QQuickItem*>(newObject);
-    if (newItem) {
-        // Make sure we make items focusable (critical for
-        // supporting keyboard shortcuts)
-        newItem->setFlag(QQuickItem::ItemIsFocusScope, true);
-    }
-
     // If we already have a root, just set a couple of flags and the ancestry
-    if (_rootItem) {
+    if (newItem && _rootItem) {
         // Allow child windows to be destroyed from JS
         QQmlEngine::setObjectOwnership(newObject, QQmlEngine::JavaScriptOwnership);
         newObject->setParent(_rootItem);
         if (newItem) {
             newItem->setParentItem(_rootItem);
         }
-        return newObject;
+        QMetaObject::invokeMethod(this, "forceQmlAudioOutputDeviceUpdate", Qt::QueuedConnection);
+        return;
     }
 
     if (!newItem) {
         qFatal("Could not load object as root item");
-        return nullptr;
+        return;
     }
 
     connect(newItem, SIGNAL(sendToScript(QVariant)), this, SIGNAL(fromQml(QVariant)));
@@ -732,7 +929,12 @@ QObject* OffscreenQmlSurface::finishQmlLoad(QQmlComponent* qmlComponent, QQmlCon
     _rootItem = newItem;
     _rootItem->setParentItem(_quickWindow->contentItem());
     _rootItem->setSize(_quickWindow->renderTargetSize());
-    return _rootItem;
+
+    // Call this callback after rootitem is set, otherwise VrMenu wont work
+    for (const auto& callback : callbacks) {
+        callback(qmlContext, newObject);
+    }
+    QMetaObject::invokeMethod(this, "forceQmlAudioOutputDeviceUpdate", Qt::QueuedConnection);
 }
 
 void OffscreenQmlSurface::updateQuick() {
@@ -771,7 +973,7 @@ QPointF OffscreenQmlSurface::mapWindowToUi(const QPointF& sourcePosition, QObjec
     return QPointF(offscreenPosition.x, offscreenPosition.y);
 }
 
-QPointF OffscreenQmlSurface::mapToVirtualScreen(const QPointF& originalPoint, QObject* originalWidget) {
+QPointF OffscreenQmlSurface::mapToVirtualScreen(const QPointF& originalPoint) {
     return _mouseTranslator(originalPoint);
 }
 
@@ -807,7 +1009,7 @@ bool OffscreenQmlSurface::eventFilter(QObject* originalDestination, QEvent* even
     switch (event->type()) {
         case QEvent::Resize: {
             QResizeEvent* resizeEvent = static_cast<QResizeEvent*>(event);
-            QWidget* widget = dynamic_cast<QWidget*>(originalDestination);
+            QWidget* widget = static_cast<QWidget*>(originalDestination);
             if (widget) {
                 this->resize(resizeEvent->size());
             }
@@ -825,7 +1027,7 @@ bool OffscreenQmlSurface::eventFilter(QObject* originalDestination, QEvent* even
 
         case QEvent::Wheel: {
             QWheelEvent* wheelEvent = static_cast<QWheelEvent*>(event);
-            QPointF transformedPos = mapToVirtualScreen(wheelEvent->pos(), originalDestination);
+            QPointF transformedPos = mapToVirtualScreen(wheelEvent->pos());
             QWheelEvent mappedEvent(
                     transformedPos,
                     wheelEvent->delta(),  wheelEvent->buttons(),
@@ -836,35 +1038,167 @@ bool OffscreenQmlSurface::eventFilter(QObject* originalDestination, QEvent* even
             }
             break;
         }
-
-        // Fall through
-        case QEvent::MouseButtonDblClick:
-        case QEvent::MouseButtonPress:
-        case QEvent::MouseButtonRelease:
-        case QEvent::MouseMove: {
-            QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
-            QPointF transformedPos = mapToVirtualScreen(mouseEvent->localPos(), originalDestination);
-            QMouseEvent mappedEvent(mouseEvent->type(),
-                    transformedPos,
-                    mouseEvent->screenPos(), mouseEvent->button(),
-                    mouseEvent->buttons(), mouseEvent->modifiers());
-            if (event->type() == QEvent::MouseMove) {
-                // TODO - this line necessary for the QML Tooltop to work (which is not currently being used), but it causes interface to crash on launch on a fresh install
-                // need to investigate into why this crash is happening.
-                //_qmlContext->setContextProperty("lastMousePosition", transformedPos);
-            }
-            mappedEvent.ignore();
-            if (QCoreApplication::sendEvent(_quickWindow, &mappedEvent)) {
-                return mappedEvent.isAccepted();
-            }
-            break;
-        }
-
         default:
             break;
     }
 
     return false;
+}
+
+unsigned int OffscreenQmlSurface::deviceIdByTouchPoint(qreal x, qreal y) {
+    auto mapped = _rootItem->mapFromGlobal(QPoint(x, y));
+
+    for (auto pair : _activeTouchPoints) {
+        if (mapped.x() == (int)pair.second.touchPoint.pos().x() && mapped.y() == (int)pair.second.touchPoint.pos().y()) {
+            return pair.first;
+        }
+    }
+
+    return PointerEvent::INVALID_POINTER_ID;
+}
+
+PointerEvent::EventType OffscreenQmlSurface::choosePointerEventType(QEvent::Type type) {
+    switch (type) {
+        case QEvent::MouseButtonDblClick:
+            return PointerEvent::DoublePress;
+        case QEvent::MouseButtonPress:
+            return PointerEvent::Press;
+        case QEvent::MouseButtonRelease:
+            return PointerEvent::Release;
+        case QEvent::MouseMove:
+            return PointerEvent::Move;
+        default:
+            return PointerEvent::Move;
+    }
+}
+
+void OffscreenQmlSurface::hoverBeginEvent(const PointerEvent& event, class QTouchDevice& device) {
+    handlePointerEvent(event, device);
+    _activeTouchPoints[event.getID()].hovering = true;
+}
+
+void OffscreenQmlSurface::hoverEndEvent(const PointerEvent& event, class QTouchDevice& device) {
+    _activeTouchPoints[event.getID()].hovering = false;
+    // Send a fake mouse move event if
+    // - the event told us to
+    // - we aren't pressing with this ID
+    if (event.sendMoveOnHoverLeave() || !_activeTouchPoints[event.getID()].pressed) {
+        // QML onReleased is only triggered if a click has happened first.  We need to send this "fake" mouse move event to properly trigger an onExited.
+        PointerEvent endMoveEvent(PointerEvent::Move, event.getID());
+        // If we aren't pressing, we want to release this TouchPoint
+        handlePointerEvent(endMoveEvent, device, !_activeTouchPoints[event.getID()].pressed);
+    }
+}
+
+bool OffscreenQmlSurface::handlePointerEvent(const PointerEvent& event, class QTouchDevice& device, bool release) {
+    // Ignore mouse interaction if we're paused
+    if (_paused || !_quickWindow) {
+        return false;
+    }
+
+    QPointF windowPoint(event.getPos2D().x, event.getPos2D().y);
+
+    Qt::TouchPointState state = Qt::TouchPointStationary;
+    if (event.getType() == PointerEvent::Press && event.getButton() == PointerEvent::PrimaryButton) {
+        state = Qt::TouchPointPressed;
+    } else if (event.getType() == PointerEvent::Release && event.getButton() == PointerEvent::PrimaryButton) {
+        state = Qt::TouchPointReleased;
+    } else if (_activeTouchPoints.count(event.getID()) && windowPoint != _activeTouchPoints[event.getID()].touchPoint.pos()) {
+        state = Qt::TouchPointMoved;
+    }
+
+    // Remove the touch point if:
+    // - this was a hover end event and the mouse wasn't pressed
+    // - this was a release event and we aren't still hovering
+    auto touchPoint = _activeTouchPoints.find(event.getID());
+    bool removeTouchPoint = release || (touchPoint != _activeTouchPoints.end() && !touchPoint->second.hovering && state == Qt::TouchPointReleased);
+    QEvent::Type touchType = QEvent::TouchUpdate;
+    if (_activeTouchPoints.empty()) {
+        // If the first active touch point is being created, send a begin
+        touchType = QEvent::TouchBegin;
+    } else if (removeTouchPoint && _activeTouchPoints.size() == 1 && _activeTouchPoints.count(event.getID())) {
+        // If the last active touch point is being released, send an end
+        touchType = QEvent::TouchEnd;
+    }
+
+    {
+        QTouchEvent::TouchPoint point;
+        point.setId(event.getID());
+        point.setState(state);
+        point.setPos(windowPoint);
+        point.setScreenPos(windowPoint);
+        _activeTouchPoints[event.getID()].touchPoint = point;
+        if (state == Qt::TouchPointPressed) {
+            _activeTouchPoints[event.getID()].pressed = true;
+        } else if (state == Qt::TouchPointReleased) {
+            _activeTouchPoints[event.getID()].pressed = false;
+        }
+    }
+
+    QTouchEvent touchEvent(touchType, &device, event.getKeyboardModifiers());
+    {
+        QList<QTouchEvent::TouchPoint> touchPoints;
+        Qt::TouchPointStates touchPointStates;
+        for (const auto& entry : _activeTouchPoints) {
+            touchPointStates |= entry.second.touchPoint.state();
+            touchPoints.push_back(entry.second.touchPoint);
+        }
+
+        touchEvent.setWindow(_quickWindow);
+        touchEvent.setDevice(&device);
+        touchEvent.setTarget(_rootItem);
+        touchEvent.setTouchPoints(touchPoints);
+        touchEvent.setTouchPointStates(touchPointStates);
+        touchEvent.setTimestamp((ulong)QDateTime::currentMSecsSinceEpoch());
+        touchEvent.ignore();
+    }
+
+    // Send mouse events to the surface so that HTML dialog elements work with mouse press and hover.
+    //
+    // In Qt 5.9 mouse events must be sent before touch events to make sure some QtQuick components will
+    // receive mouse events
+    Qt::MouseButton button = Qt::NoButton;
+    Qt::MouseButtons buttons = Qt::NoButton;
+    if (event.getButton() == PointerEvent::PrimaryButton) {
+        button = Qt::LeftButton;
+    }
+    if (event.getButtons() & PointerEvent::PrimaryButton) {
+        buttons |= Qt::LeftButton;
+    }
+
+    bool eventSent = false;
+    bool eventsAccepted = true;
+
+    if (event.getType() == PointerEvent::Move) {
+        QMouseEvent mouseEvent(QEvent::MouseMove, windowPoint, windowPoint, windowPoint, button, buttons, event.getKeyboardModifiers());
+        // TODO - this line necessary for the QML Tooltop to work (which is not currently being used), but it causes interface to crash on launch on a fresh install
+        // need to investigate into why this crash is happening.
+        //_qmlContext->setContextProperty("lastMousePosition", windowPoint);
+        mouseEvent.ignore();
+        if (QCoreApplication::sendEvent(_quickWindow, &mouseEvent)) {
+            eventSent = true;
+            eventsAccepted &= mouseEvent.isAccepted();
+        }
+    }
+
+    if (touchType == QEvent::TouchBegin) {
+        _touchBeginAccepted = QCoreApplication::sendEvent(_quickWindow, &touchEvent);
+        if (_touchBeginAccepted) {
+            eventSent = true;
+            eventsAccepted &= touchEvent.isAccepted();
+        }
+    } else if (_touchBeginAccepted) {
+        if (QCoreApplication::sendEvent(_quickWindow, &touchEvent)) {
+            eventSent = true;
+            eventsAccepted &= touchEvent.isAccepted();
+        }
+    }
+
+    if (removeTouchPoint) {
+        _activeTouchPoints.erase(event.getID());
+    }
+
+    return eventSent && eventsAccepted;
 }
 
 void OffscreenQmlSurface::pause() {
@@ -912,7 +1246,7 @@ void OffscreenQmlSurface::focusDestroyed(QObject *obj) {
 }
 
 void OffscreenQmlSurface::onFocusObjectChanged(QObject* object) {
-    QQuickItem* item = dynamic_cast<QQuickItem*>(object);
+    QQuickItem* item = static_cast<QQuickItem*>(object);
     if (!item) {
         setFocusText(false);
         _currentFocusItem = nullptr;
@@ -954,6 +1288,7 @@ static const uint8_t BACKSPACE_SYMBOL[] = { 0xE2, 0x86, 0x90, 0x00 };
 static const uint8_t LEFT_ARROW[] = { 0xE2, 0x9D, 0xAC, 0x00 };
 static const uint8_t RIGHT_ARROW[] = { 0xE2, 0x9D, 0xAD, 0x00 };
 static const uint8_t RETURN_SYMBOL[] = { 0xE2, 0x8F, 0x8E, 0x00 };
+static const uint8_t COLLAPSE_KEYBOARD[] = { 0xEE, 0x80, 0xAB, 0x00 };
 static const char PUNCTUATION_STRING[] = "123";
 static const char ALPHABET_STRING[] = "abc";
 
@@ -967,8 +1302,8 @@ static bool equals(const QByteArray& byteArray, const uint8_t* ptr) {
     return ptr[i] == 0x00;
 }
 
-void OffscreenQmlSurface::synthesizeKeyPress(QString key) {
-    auto eventHandler = getEventHandler();
+void OffscreenQmlSurface::synthesizeKeyPress(QString key, QObject* targetOverride) {
+    auto eventHandler = targetOverride ? targetOverride : getEventHandler();
     if (eventHandler) {
         auto utf8Key = key.toUtf8();
 
@@ -977,6 +1312,9 @@ void OffscreenQmlSurface::synthesizeKeyPress(QString key) {
         if (equals(utf8Key, SHIFT_ARROW) || equals(utf8Key, NUMERIC_SHIFT_ARROW) ||
             equals(utf8Key, (uint8_t*)PUNCTUATION_STRING) || equals(utf8Key, (uint8_t*)ALPHABET_STRING)) {
             return;  // ignore
+        } else if (equals(utf8Key, COLLAPSE_KEYBOARD)) {
+            lowerKeyboard();
+            return;
         } else if (equals(utf8Key, BACKSPACE_SYMBOL)) {
             scanCode = Qt::Key_Backspace;
             keyString = "\x08";
@@ -998,7 +1336,23 @@ void OffscreenQmlSurface::synthesizeKeyPress(QString key) {
     }
 }
 
-void OffscreenQmlSurface::setKeyboardRaised(QObject* object, bool raised, bool numeric) {
+void OffscreenQmlSurface::lowerKeyboard() {
+
+    QSignalBlocker blocker(_quickWindow);
+
+    if (_currentFocusItem) {
+        _currentFocusItem->setFocus(false);
+        setKeyboardRaised(_currentFocusItem, false);
+    }
+}
+
+void OffscreenQmlSurface::setKeyboardRaised(QObject* object, bool raised, bool numeric, bool passwordField) {
+    qCDebug(uiLogging) << "setKeyboardRaised: " << object << ", raised: " << raised << ", numeric: " << numeric << ", password: " << passwordField;
+
+#if Q_OS_ANDROID
+    return;
+#endif
+
     if (!object) {
         return;
     }
@@ -1006,15 +1360,33 @@ void OffscreenQmlSurface::setKeyboardRaised(QObject* object, bool raised, bool n
     // if HMD is being worn, allow keyboard to open.  allow it to close, HMD or not.
     if (!raised || qApp->property(hifi::properties::HMD).toBool()) {
         QQuickItem* item = dynamic_cast<QQuickItem*>(object);
+        if (!item) {
+            return;
+        }
+
+        // for future probably makes sense to consider one of the following:
+        // 1. make keyboard a singleton, which will be dynamically re-parented before showing
+        // 2. track currently visible keyboard somewhere, allow to subscribe for this signal
+        // any of above should also eliminate need in duplicated properties and code below
+
         while (item) {
             // Numeric value may be set in parameter from HTML UI; for QML UI, detect numeric fields here.
             numeric = numeric || QString(item->metaObject()->className()).left(7) == "SpinBox";
 
             if (item->property("keyboardRaised").isValid()) {
+
                 // FIXME - HMD only: Possibly set value of "keyboardEnabled" per isHMDMode() for use in WebView.qml.
                 if (item->property("punctuationMode").isValid()) {
                     item->setProperty("punctuationMode", QVariant(numeric));
                 }
+                if (item->property("passwordField").isValid()) {
+                    item->setProperty("passwordField", QVariant(passwordField));
+                }
+
+                if (raised) {
+                    item->setProperty("keyboardRaised", QVariant(!raised));
+                }
+
                 item->setProperty("keyboardRaised", QVariant(raised));
                 return;
             }
@@ -1039,9 +1411,13 @@ void OffscreenQmlSurface::emitWebEvent(const QVariant& message) {
         const QString RAISE_KEYBOARD = "_RAISE_KEYBOARD";
         const QString RAISE_KEYBOARD_NUMERIC = "_RAISE_KEYBOARD_NUMERIC";
         const QString LOWER_KEYBOARD = "_LOWER_KEYBOARD";
+        const QString RAISE_KEYBOARD_NUMERIC_PASSWORD = "_RAISE_KEYBOARD_NUMERIC_PASSWORD";
+        const QString RAISE_KEYBOARD_PASSWORD = "_RAISE_KEYBOARD_PASSWORD";
         QString messageString = message.type() == QVariant::String ? message.toString() : "";
         if (messageString.left(RAISE_KEYBOARD.length()) == RAISE_KEYBOARD) {
-            setKeyboardRaised(_currentFocusItem, true, messageString == RAISE_KEYBOARD_NUMERIC);
+            bool numeric = (messageString == RAISE_KEYBOARD_NUMERIC || messageString == RAISE_KEYBOARD_NUMERIC_PASSWORD);
+            bool passwordField = (messageString == RAISE_KEYBOARD_PASSWORD || messageString == RAISE_KEYBOARD_NUMERIC_PASSWORD);
+            setKeyboardRaised(_currentFocusItem, true, numeric, passwordField);
         } else if (messageString == LOWER_KEYBOARD) {
             setKeyboardRaised(_currentFocusItem, false);
         } else {
@@ -1058,5 +1434,6 @@ void OffscreenQmlSurface::sendToQml(const QVariant& message) {
         QMetaObject::invokeMethod(_rootItem, "fromScript", Qt::QueuedConnection, Q_ARG(QVariant, message));
     }
 }
+
 
 #include "OffscreenQmlSurface.moc"

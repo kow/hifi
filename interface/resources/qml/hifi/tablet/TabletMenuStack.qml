@@ -64,11 +64,11 @@ Item {
             d.pop();
         }
 
-        function toModel(items) {
+        function toModel(items, newMenu) {
             var result = modelMaker.createObject(tabletMenu);
+
             for (var i = 0; i < items.length; ++i) {
                 var item = items[i];
-                if (!item.visible) continue;
                 switch (item.type) {
                 case MenuItemType.Menu:
                     result.append({"name": item.title, "item": item})
@@ -133,10 +133,21 @@ Item {
             }
         }
 
+        property Component exclusiveGroupMaker: Component {
+            ExclusiveGroup {
+            }
+        }
+
         function buildMenu(items) {
-            var model = toModel(items);
             // Menus must be childed to desktop for Z-ordering
-            var newMenu = menuViewMaker.createObject(tabletMenu, { model: model, isSubMenu: topMenu !== null });
+            var newMenu = menuViewMaker.createObject(tabletMenu);
+            console.debug('newMenu created: ', newMenu)
+
+            var model = toModel(items, newMenu);
+
+            newMenu.model = model;
+            newMenu.isSubMenu = topMenu !== null;
+
             pushMenu(newMenu);
             return newMenu;
         }
@@ -181,5 +192,4 @@ Item {
     function nextItem() { d.topMenu.nextItem(); }
     function selectCurrentItem() { d.topMenu.selectCurrentItem(); }
     function previousPage() { d.topMenu.previousPage(); }
-
 }

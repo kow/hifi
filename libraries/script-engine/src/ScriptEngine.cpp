@@ -97,6 +97,8 @@ static const bool HIFI_AUTOREFRESH_FILE_SCRIPTS { true };
 Q_DECLARE_METATYPE(QScriptEngine::FunctionSignature)
 int functionSignatureMetaID = qRegisterMetaType<QScriptEngine::FunctionSignature>();
 
+int scriptEnginePointerMetaID = qRegisterMetaType<ScriptEnginePointer>();
+
 Q_LOGGING_CATEGORY(scriptengineScript, "hifi.scriptengine.script")
 
 static QScriptValue debugPrint(QScriptContext* context, QScriptEngine* engine) {
@@ -107,10 +109,13 @@ static QScriptValue debugPrint(QScriptContext* context, QScriptEngine* engine) {
         }
         message += context->argument(i).toString();
     }
-    qCDebug(scriptengineScript).noquote() << message;  // noquote() so that \n is treated as newline
 
     if (ScriptEngine *scriptEngine = qobject_cast<ScriptEngine*>(engine)) {
         scriptEngine->print(message);
+        // prefix the script engine name to help disambiguate messages in the main debug log
+        qCDebug(scriptengineScript, "[%s] %s", qUtf8Printable(scriptEngine->getFilename()), qUtf8Printable(message));
+    } else {
+        qCDebug(scriptengineScript, "%s", qUtf8Printable(message));
     }
 
     return QScriptValue();
@@ -153,6 +158,15 @@ QString ScriptEngine::logException(const QScriptValue& exception) {
     return message;
 }
 
+ScriptEnginePointer scriptEngineFactory(ScriptEngine::Context context,
+                                                 const QString& scriptContents,
+                                                 const QString& fileNameString) {
+    ScriptEngine* engine = new ScriptEngine(context, scriptContents, fileNameString);
+    ScriptEnginePointer engineSP = ScriptEnginePointer(engine);
+    DependencyManager::get<ScriptEngines>()->addScriptEngine(qSharedPointerCast<ScriptEngine>(engineSP));
+    return engineSP;
+}
+
 int ScriptEngine::processLevelMaxRetries { ScriptRequest::MAX_RETRIES };
 ScriptEngine::ScriptEngine(Context context, const QString& scriptContents, const QString& fileNameString) :
     BaseScriptEngine(),
@@ -160,10 +174,10 @@ ScriptEngine::ScriptEngine(Context context, const QString& scriptContents, const
     _scriptContents(scriptContents),
     _timerFunctionMap(),
     _fileNameString(fileNameString),
-    _arrayBufferClass(new ArrayBufferClass(this))
+    _arrayBufferClass(new ArrayBufferClass(this)),
+    // don't delete `ScriptEngines` until all `ScriptEngine`s are gone
+    _scriptEngines(DependencyManager::get<ScriptEngines>())
 {
-    DependencyManager::get<ScriptEngines>()->addScriptEngine(this);
-
     connect(this, &QScriptEngine::signalHandlerException, this, [this](const QScriptValue& exception) {
         if (hasUncaughtException()) {
             // the engine's uncaughtException() seems to produce much better stack traces here
@@ -208,22 +222,9 @@ QString ScriptEngine::getContext() const {
 }
 
 ScriptEngine::~ScriptEngine() {
-    // FIXME: are these scriptInfoMessage/scriptWarningMessage segfaulting anybody else at app shutdown?
-#if !defined(Q_OS_LINUX)
-    scriptInfoMessage("Script Engine shutting down:" + getFilename());
-#else
-    qCDebug(scriptengine) << "~ScriptEngine()" << this;
-#endif
-
     auto scriptEngines = DependencyManager::get<ScriptEngines>();
     if (scriptEngines) {
-        scriptEngines->removeScriptEngine(this);
-    } else {
-#if !defined(Q_OS_LINUX)
-        scriptWarningMessage("Script destroyed after ScriptEngines!");
-#else
-        qCWarning(scriptengine) << ("Script destroyed after ScriptEngines!");
-#endif
+        scriptEngines->removeScriptEngine(qSharedPointerCast<ScriptEngine>(sharedFromThis()));
     }
 }
 
@@ -294,7 +295,7 @@ void ScriptEngine::runDebuggable() {
             stopAllTimers(); // make sure all our timers are stopped if the script is ending
 
             emit scriptEnding();
-            emit finished(_fileNameString, this);
+            emit finished(_fileNameString, qSharedPointerCast<ScriptEngine>(sharedFromThis()));
             _isRunning = false;
 
             emit runningStateChanged();
@@ -469,22 +470,22 @@ void ScriptEngine::loadURL(const QUrl& scriptURL, bool reload) {
 }
 
 void ScriptEngine::scriptErrorMessage(const QString& message) {
-    qCCritical(scriptengine) << qPrintable(message);
+    qCCritical(scriptengine, "[%s] %s", qUtf8Printable(getFilename()), qUtf8Printable(message));
     emit errorMessage(message, getFilename());
 }
 
 void ScriptEngine::scriptWarningMessage(const QString& message) {
-    qCWarning(scriptengine) << qPrintable(message);
+    qCWarning(scriptengine, "[%s] %s", qUtf8Printable(getFilename()), qUtf8Printable(message));
     emit warningMessage(message, getFilename());
 }
 
 void ScriptEngine::scriptInfoMessage(const QString& message) {
-    qCInfo(scriptengine) << qPrintable(message);
+    qCInfo(scriptengine, "[%s] %s", qUtf8Printable(getFilename()), qUtf8Printable(message));
     emit infoMessage(message, getFilename());
 }
 
 void ScriptEngine::scriptPrintedMessage(const QString& message) {
-    qCDebug(scriptengine) << qPrintable(message);
+    qCDebug(scriptengine, "[%s] %s", qUtf8Printable(getFilename()), qUtf8Printable(message));
     emit printedMessage(message, getFilename());
 }
 
@@ -503,7 +504,8 @@ static void animVarMapFromScriptValue(const QScriptValue& value, AnimVariantMap&
     parameters.animVariantMapFromScriptValue(value);
 }
 // ... while these two are not. But none of the four are ever used.
-static QScriptValue resultHandlerToScriptValue(QScriptEngine* engine, const AnimVariantResultHandler& resultHandler) {
+static QScriptValue resultHandlerToScriptValue(QScriptEngine* engine,
+                                               const AnimVariantResultHandler& resultHandler) {
     qCCritical(scriptengine) << "Attempt to marshall result handler to javascript";
     assert(false);
     return QScriptValue();
@@ -516,7 +518,8 @@ static void resultHandlerFromScriptValue(const QScriptValue& value, AnimVariantR
 // Templated qScriptRegisterMetaType fails to compile with raw pointers
 using ScriptableResourceRawPtr = ScriptableResource*;
 
-static QScriptValue scriptableResourceToScriptValue(QScriptEngine* engine, const ScriptableResourceRawPtr& resource) {
+static QScriptValue scriptableResourceToScriptValue(QScriptEngine* engine,
+                                                    const ScriptableResourceRawPtr& resource) {
     // The first script to encounter this resource will track its memory.
     // In this way, it will be more likely to GC.
     // This fails in the case that the resource is used across many scripts, but
@@ -539,11 +542,11 @@ static void scriptableResourceFromScriptValue(const QScriptValue& value, Scripta
     resource = static_cast<ScriptableResourceRawPtr>(value.toQObject());
 }
 
-static QScriptValue createScriptableResourcePrototype(QScriptEngine* engine) {
+static QScriptValue createScriptableResourcePrototype(ScriptEnginePointer engine) {
     auto prototype = engine->newObject();
 
     // Expose enum State to JS/QML via properties
-    QObject* state = new QObject(engine);
+    QObject* state = new QObject(engine.data());
     state->setObjectName("ResourceState");
     auto metaEnum = QMetaEnum::fromType<ScriptableResource::State>();
     for (int i = 0; i < metaEnum.keyCount(); ++i) {
@@ -693,7 +696,7 @@ void ScriptEngine::init() {
     qScriptRegisterMetaType(this, resultHandlerToScriptValue, resultHandlerFromScriptValue);
 
     // Scriptable cache access
-    auto resourcePrototype = createScriptableResourcePrototype(this);
+    auto resourcePrototype = createScriptableResourcePrototype(qSharedPointerCast<ScriptEngine>(sharedFromThis()));
     globalObject().setProperty("Resource", resourcePrototype);
     setDefaultPrototype(qMetaTypeId<ScriptableResource*>(), resourcePrototype);
     qScriptRegisterMetaType(this, scriptableResourceToScriptValue, scriptableResourceFromScriptValue);
@@ -1178,7 +1181,7 @@ void ScriptEngine::run() {
         }
     }
 
-    emit finished(_fileNameString, this);
+    emit finished(_fileNameString, qSharedPointerCast<ScriptEngine>(sharedFromThis()));
 
     _isRunning = false;
     emit runningStateChanged();
@@ -2472,7 +2475,7 @@ void ScriptEngine::callWithEnvironment(const EntityItemID& entityID, const QUrl&
     doWithEnvironment(entityID, sandboxURL, operation);
 }
 
-void ScriptEngine::callEntityScriptMethod(const EntityItemID& entityID, const QString& methodName, const QStringList& params) {
+void ScriptEngine::callEntityScriptMethod(const EntityItemID& entityID, const QString& methodName, const QStringList& params, const QUuid& remoteCallerID) {
     if (QThread::currentThread() != thread()) {
 #ifdef THREAD_DEBUGGING
         qCDebug(scriptengine) << "*** WARNING *** ScriptEngine::callEntityScriptMethod() called on wrong thread [" << QThread::currentThread() << "], invoking on correct thread [" << thread() << "]  "
@@ -2482,7 +2485,8 @@ void ScriptEngine::callEntityScriptMethod(const EntityItemID& entityID, const QS
         QMetaObject::invokeMethod(this, "callEntityScriptMethod",
                                   Q_ARG(const EntityItemID&, entityID),
                                   Q_ARG(const QString&, methodName),
-                                  Q_ARG(const QStringList&, params));
+                                  Q_ARG(const QStringList&, params),
+                                  Q_ARG(const QUuid&, remoteCallerID));
         return;
     }
 #ifdef THREAD_DEBUGGING
@@ -2496,13 +2500,41 @@ void ScriptEngine::callEntityScriptMethod(const EntityItemID& entityID, const QS
     if (isEntityScriptRunning(entityID)) {
         EntityScriptDetails details = _entityScripts[entityID];
         QScriptValue entityScript = details.scriptObject; // previously loaded
-        if (entityScript.property(methodName).isFunction()) {
+
+        // If this is a remote call, we need to check to see if the function is remotely callable
+        // we do this by checking for the existance of the 'remotelyCallable' property on the
+        // entityScript. And we confirm that the method name is included. If this fails, the
+        // function will not be called.
+        bool callAllowed = false;
+        if (remoteCallerID == QUuid()) {
+            callAllowed = true;
+        } else {
+            if (entityScript.property("remotelyCallable").isArray()) {
+                auto callables = entityScript.property("remotelyCallable");
+                auto callableCount = callables.property("length").toInteger();
+                for (int i = 0; i < callableCount; i++) {
+                    auto callable = callables.property(i).toString();
+                    if (callable == methodName) {
+                        callAllowed = true;
+                        break;
+                    }
+                }
+            }
+            if (!callAllowed) {
+                qDebug() << "Method [" << methodName << "] not remotely callable.";
+            }
+        }
+
+        if (callAllowed && entityScript.property(methodName).isFunction()) {
             QScriptValueList args;
             args << entityID.toScriptValue(this);
             args << qScriptValueFromSequence(this, params);
-            callWithEnvironment(entityID, details.definingSandboxURL, entityScript.property(methodName), entityScript, args);
-        }
 
+            QScriptValue oldData = this->globalObject().property("Script").property("remoteCallerID");
+            this->globalObject().property("Script").setProperty("remoteCallerID", remoteCallerID.toString()); // Make the remoteCallerID available to javascript as a global.
+            callWithEnvironment(entityID, details.definingSandboxURL, entityScript.property(methodName), entityScript, args);
+            this->globalObject().property("Script").setProperty("remoteCallerID", oldData);
+        }
     }
 }
 

@@ -15,12 +15,13 @@
 //
 
 /* global MyAvatar, Entities, Script, Camera, Vec3, Reticle, Overlays, getEntityCustomData, Messages, Quat, Controller,
-   isInEditMode, HMD */
+   isInEditMode, HMD entityIsGrabbable, Pointers, PickType RayPick*/
 
 
 (function() { // BEGIN LOCAL_SCOPE
 
-Script.include("/~/system/libraries/utils.js");
+    Script.include("/~/system/libraries/utils.js");
+    Script.include("/~/system/libraries/controllerDispatcherUtils.js");
 var MAX_SOLID_ANGLE = 0.01; // objects that appear smaller than this can't be grabbed
 
 var DELAY_FOR_30HZ = 33; // milliseconds
@@ -259,14 +260,14 @@ function Grabber() {
 
     this.mouseRayOverlays = RayPick.createRayPick({
         joint: "Mouse",
-        filter: RayPick.PICK_OVERLAYS,
+        filter: Picks.PICK_OVERLAYS,
         enabled: true
     });
-    RayPick.setIncludeOverlays(this.mouseRayOverlays, [HMD.tabletID, HMD.tabletScreenID, HMD.homeButtonID]);
+    RayPick.setIncludeItems(this.mouseRayOverlays, [HMD.tabletID, HMD.tabletScreenID, HMD.homeButtonID]);
     var renderStates = [{name: "grabbed", end: beacon}];
-    this.mouseRayEntities = LaserPointers.createLaserPointer({
+    this.mouseRayEntities = Pointers.createPointer(PickType.Ray, {
         joint: "Mouse",
-        filter: RayPick.PICK_ENTITIES,
+        filter: Picks.PICK_ENTITIES,
         faceAvatar: true,
         enabled: true,
         renderStates: renderStates
@@ -306,11 +307,15 @@ Grabber.prototype.computeNewGrabPlane = function() {
 };
 
 Grabber.prototype.pressEvent = function(event) {
-    if (isInEditMode()) {
+    if (isInEditMode() || HMD.active) {
         return;
     }
 
     if (event.isLeftButton !== true || event.isRightButton === true || event.isMiddleButton === true) {
+        return;
+    }
+
+    if (event.isAlt || event.isMeta) {
         return;
     }
 
@@ -320,19 +325,21 @@ Grabber.prototype.pressEvent = function(event) {
     }
 
     var overlayResult = RayPick.getPrevRayPickResult(this.mouseRayOverlays);
-    if (overlayResult.type != RayPick.INTERSECTED_NONE) {
+    if (overlayResult.type != Picks.INTERSECTED_NONE) {
         return;
     }
 
-    var pickResults = LaserPointers.getPrevRayPickResult(this.mouseRayEntities);
-    if (pickResults.type == RayPick.INTERSECTED_NONE) {
-        LaserPointers.setRenderState(this.mouseRayEntities, "");
+    var pickResults = Pointers.getPrevPickResult(this.mouseRayEntities);
+    if (pickResults.type == Picks.INTERSECTED_NONE) {
+        Pointers.setRenderState(this.mouseRayEntities, "");
         return;
     }
 
-    var isDynamic = Entities.getEntityProperties(pickResults.objectID, "dynamic").dynamic;
-    if (!isDynamic) {
-        // only grab dynamic objects
+    var props = Entities.getEntityProperties(pickResults.objectID, ["dynamic", "userData", "locked", "type"]);
+    var isDynamic = props.dynamic;
+    var isGrabbable = props.grabbable;
+    if (!entityIsGrabbable(props)) {
+        // only grab grabbable objects
         return;
     }
 
@@ -341,8 +348,8 @@ Grabber.prototype.pressEvent = function(event) {
         return;
     }
 
-    LaserPointers.setRenderState(this.mouseRayEntities, "grabbed");
-    LaserPointers.setLockEndUUID(this.mouseRayEntities, pickResults.objectID, false);
+    Pointers.setRenderState(this.mouseRayEntities, "grabbed");
+    Pointers.setLockEndUUID(this.mouseRayEntities, pickResults.objectID, false);
 
     mouse.startDrag(event);
 
@@ -350,17 +357,23 @@ Grabber.prototype.pressEvent = function(event) {
     var entityProperties = Entities.getEntityProperties(clickedEntity);
     this.startPosition = entityProperties.position;
     this.lastRotation = entityProperties.rotation;
+    this.madeDynamic = false;
     var cameraPosition = Camera.getPosition();
 
     var objectBoundingDiameter = Vec3.length(entityProperties.dimensions);
     beacon.dimensions.y = objectBoundingDiameter;
-    LaserPointers.editRenderState(this.mouseRayEntities, "grabbed", {end: beacon});
+    Pointers.editRenderState(this.mouseRayEntities, "grabbed", {end: beacon});
     this.maxDistance = objectBoundingDiameter / MAX_SOLID_ANGLE;
     if (Vec3.distance(this.startPosition, cameraPosition) > this.maxDistance) {
         // don't allow grabs of things far away
         return;
     }
 
+    if (entityIsGrabbable(props) && !isDynamic) {
+        entityProperties.dynamic = true;
+        Entities.editEntity(clickedEntity, entityProperties);
+        this.madeDynamic = true;
+    }
     // this.activateEntity(clickedEntity, entityProperties);
     this.isGrabbing = true;
 
@@ -401,7 +414,7 @@ Grabber.prototype.pressEvent = function(event) {
 };
 
 Grabber.prototype.releaseEvent = function(event) {
-    if (event.isLeftButton!==true || event.isRightButton===true || event.isMiddleButton===true) {
+    if ((event.isLeftButton!==true || event.isRightButton===true || event.isMiddleButton===true) && !HMD.active) {
         return;
     }
 
@@ -416,9 +429,17 @@ Grabber.prototype.releaseEvent = function(event) {
         if (this.actionID) {
             Entities.deleteAction(this.entityID, this.actionID);
         }
+
+        if (this.madeDynamic) {
+            var entityProps = {};
+            entityProps.dynamic = false;
+            entityProps.localVelocity = {x: 0, y: 0, z: 0};
+            Entities.editEntity(this.entityID, entityProps);
+        }
+
         this.actionID = null;
 
-        LaserPointers.setRenderState(this.mouseRayEntities, "");
+        Pointers.setRenderState(this.mouseRayEntities, "");
 
         var args = "mouse";
         Entities.callEntityMethod(this.entityID, "releaseGrab", args);
@@ -447,7 +468,7 @@ Grabber.prototype.moveEvent = function(event) {
     // during the handling of the event, do as little as possible.  We save the updated mouse position,
     // and start a timer to react to the change.  If more changes arrive before the timer fires, only
     // the last update will be considered.  This is done to avoid backing-up Qt's event queue.
-    if (!this.isGrabbing) {
+    if (!this.isGrabbing || HMD.active) {
         return;
     }
     mouse.updateDrag(event);
@@ -458,7 +479,7 @@ Grabber.prototype.moveEventProcess = function() {
     this.moveEventTimer = null;
     // see if something added/restored gravity
     var entityProperties = Entities.getEntityProperties(this.entityID);
-    if (!entityProperties || !entityProperties.gravity) {
+    if (!entityProperties || !entityProperties.gravity || HMD.active) {
         return;
     }
 
@@ -573,7 +594,7 @@ Grabber.prototype.keyPressEvent = function(event) {
 };
 
 Grabber.prototype.cleanup = function() {
-    LaserPointers.removeLaserPointer(this.mouseRayEntities);
+    Pointers.removePointer(this.mouseRayEntities);
     RayPick.removeRayPick(this.mouseRayOverlays);
 };
 

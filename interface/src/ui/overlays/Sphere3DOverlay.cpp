@@ -27,7 +27,7 @@ Sphere3DOverlay::Sphere3DOverlay(const Sphere3DOverlay* Sphere3DOverlay) :
 }
 
 void Sphere3DOverlay::render(RenderArgs* args) {
-    if (!_visible) {
+    if (!_renderVisible) {
         return; // do nothing if we're not visible
     }
 
@@ -39,9 +39,7 @@ void Sphere3DOverlay::render(RenderArgs* args) {
     auto batch = args->_batch;
 
     if (batch) {
-        Transform transform = getTransform();
-        transform.postScale(getDimensions() * SPHERE_OVERLAY_SCALE);
-        batch->setModelTransform(transform);
+        batch->setModelTransform(getRenderTransform());
 
         auto geometryCache = DependencyManager::get<GeometryCache>();
         auto shapePipeline = args->_shapePipeline;
@@ -62,7 +60,7 @@ const render::ShapeKey Sphere3DOverlay::getShapeKey() {
     if (isTransparent()) {
         builder.withTranslucent();
     }
-    if (!getIsSolid() || shouldDrawHUDLayer()) {
+    if (!getIsSolid()) {
         builder.withUnlit().withDepthBias();
     }
     return builder.build();
@@ -70,4 +68,12 @@ const render::ShapeKey Sphere3DOverlay::getShapeKey() {
 
 Sphere3DOverlay* Sphere3DOverlay::createClone() const {
     return new Sphere3DOverlay(this);
+}
+
+Transform Sphere3DOverlay::evalRenderTransform() {
+    Transform transform = getTransform();
+    transform.setScale(1.0f);  // ignore inherited scale from SpatiallyNestable
+    transform.postScale(getDimensions() * SPHERE_OVERLAY_SCALE);
+
+    return transform;
 }

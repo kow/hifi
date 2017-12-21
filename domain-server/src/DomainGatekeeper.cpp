@@ -184,6 +184,11 @@ NodePermissions DomainGatekeeper::setPermissionsForUser(bool isLocalUser, QStrin
 #ifdef WANT_DEBUG
             qDebug() << "|  user-permissions: specific MAC matches, so:" << userPerms;
 #endif
+        } else if (_server->_settingsManager.hasPermissionsForMachineFingerprint(machineFingerprint)) {
+            userPerms = _server->_settingsManager.getPermissionsForMachineFingerprint(machineFingerprint);
+#ifdef WANT_DEBUG
+            qDebug(() << "| user-permissions: specific Machine Fingerprint matches, so: " << userPerms;
+#endif
         } else if (_server->_settingsManager.hasPermissionsForIP(senderAddress)) {
             // this user comes from an IP we have in our permissions table, apply those permissions
             userPerms = _server->_settingsManager.getPermissionsForIP(senderAddress);
@@ -269,25 +274,27 @@ void DomainGatekeeper::updateNodePermissions() {
             userPerms.permissions |= NodePermissions::Permission::canAdjustLocks;
             userPerms.permissions |= NodePermissions::Permission::canRezPermanentEntities;
             userPerms.permissions |= NodePermissions::Permission::canRezTemporaryEntities;
+            userPerms.permissions |= NodePermissions::Permission::canRezPermanentCertifiedEntities;
+            userPerms.permissions |= NodePermissions::Permission::canRezTemporaryCertifiedEntities;
             userPerms.permissions |= NodePermissions::Permission::canWriteToAssetServer;
             userPerms.permissions |= NodePermissions::Permission::canReplaceDomainContent;
         } else {
-            // this node is an agent
-            const QHostAddress& addr = node->getLocalSocket().getAddress();
-            bool isLocalUser = (addr == limitedNodeList->getLocalSockAddr().getAddress() ||
-                                addr == QHostAddress::LocalHost);
-
             // at this point we don't have a sending socket for packets from this node - assume it is the active socket
             // or the public socket if we haven't activated a socket for the node yet
             HifiSockAddr connectingAddr = node->getActiveSocket() ? *node->getActiveSocket() : node->getPublicSocket();
 
             QString hardwareAddress;
             QUuid machineFingerprint;
+            bool isLocalUser { false };
 
             DomainServerNodeData* nodeData = static_cast<DomainServerNodeData*>(node->getLinkedData());
             if (nodeData) {
                 hardwareAddress = nodeData->getHardwareAddress();
                 machineFingerprint = nodeData->getMachineFingerprint();
+
+                auto sendingAddress = nodeData->getSendingSockAddr().getAddress();
+                isLocalUser = (sendingAddress == limitedNodeList->getLocalSockAddr().getAddress() ||
+                               sendingAddress == QHostAddress::LocalHost);
             }
 
             userPerms = setPermissionsForUser(isLocalUser, verifiedUsername, connectingAddr.getAddress(), hardwareAddress, machineFingerprint);
@@ -358,6 +365,8 @@ SharedNodePointer DomainGatekeeper::processAssignmentConnectRequest(const NodeCo
     userPerms.permissions |= NodePermissions::Permission::canAdjustLocks;
     userPerms.permissions |= NodePermissions::Permission::canRezPermanentEntities;
     userPerms.permissions |= NodePermissions::Permission::canRezTemporaryEntities;
+    userPerms.permissions |= NodePermissions::Permission::canRezPermanentCertifiedEntities;
+    userPerms.permissions |= NodePermissions::Permission::canRezTemporaryCertifiedEntities;
     userPerms.permissions |= NodePermissions::Permission::canWriteToAssetServer;
     userPerms.permissions |= NodePermissions::Permission::canReplaceDomainContent;
     newNode->setPermissions(userPerms);
@@ -810,9 +819,15 @@ void DomainGatekeeper::processICEPeerInformationPacket(QSharedPointer<ReceivedMe
 
 void DomainGatekeeper::processICEPingPacket(QSharedPointer<ReceivedMessage> message) {
     auto limitedNodeList = DependencyManager::get<LimitedNodeList>();
-    auto pingReplyPacket = limitedNodeList->constructICEPingReplyPacket(*message, limitedNodeList->getSessionUUID());
 
-    limitedNodeList->sendPacket(std::move(pingReplyPacket), message->getSenderSockAddr());
+    // before we respond to this ICE ping packet, make sure we have a peer in the list that matches
+    QUuid icePeerID = QUuid::fromRfc4122({ message->getRawMessage(), NUM_BYTES_RFC4122_UUID });
+    
+    if (_icePeers.contains(icePeerID)) {
+        auto pingReplyPacket = limitedNodeList->constructICEPingReplyPacket(*message, limitedNodeList->getSessionUUID());
+
+        limitedNodeList->sendPacket(std::move(pingReplyPacket), message->getSenderSockAddr());
+    }
 }
 
 void DomainGatekeeper::processICEPingReplyPacket(QSharedPointer<ReceivedMessage> message) {

@@ -98,7 +98,7 @@ public:
 
     void updateRenderItem(render::Transaction& transaction);
 
-    virtual void postUpdate(float deltaTime);
+    virtual void postUpdate(float deltaTime, const render::ScenePointer& scene);
 
     //setters
     void setIsLookAtTarget(const bool isLookAtTarget) { _isLookAtTarget = isLookAtTarget; }
@@ -108,7 +108,6 @@ public:
     SkeletonModelPointer getSkeletonModel() { return _skeletonModel; }
     const SkeletonModelPointer getSkeletonModel() const { return _skeletonModel; }
     glm::vec3 getChestPosition() const;
-    float getUniformScale() const { return getScale().y; }
     const Head* getHead() const { return static_cast<const Head*>(_headData); }
     Head* getHead() { return static_cast<Head*>(_headData); }
 
@@ -120,8 +119,10 @@ public:
     virtual bool isMyAvatar() const override { return false; }
 
     virtual QVector<glm::quat> getJointRotations() const override;
+    using AvatarData::getJointRotation;
     virtual glm::quat getJointRotation(int index) const override;
     virtual QVector<glm::vec3> getJointTranslations() const override;
+    using AvatarData::getJointTranslation;
     virtual glm::vec3 getJointTranslation(int index) const override;
     virtual int getJointIndex(const QString& name) const override;
     virtual QStringList getJointNames() const override;
@@ -149,6 +150,7 @@ public:
      */
     Q_INVOKABLE virtual glm::vec3 getAbsoluteDefaultJointTranslationInObjectFrame(int index) const;
 
+    virtual glm::vec3 getAbsoluteJointScaleInObjectFrame(int index) const override;
     virtual glm::quat getAbsoluteJointRotationInObjectFrame(int index) const override;
     virtual glm::vec3 getAbsoluteJointTranslationInObjectFrame(int index) const override;
     virtual bool setAbsoluteJointRotationInObjectFrame(int index, const glm::quat& rotation) override { return false; }
@@ -230,6 +232,7 @@ public:
 
     void animateScaleChanges(float deltaTime);
     void setTargetScale(float targetScale) override;
+    float getTargetScale() const { return _targetScale; }
 
     Q_INVOKABLE float getSimulationRate(const QString& rateName = QString("")) const;
 
@@ -240,6 +243,7 @@ public:
     void addToScene(AvatarSharedPointer self, const render::ScenePointer& scene);
     void ensureInScene(AvatarSharedPointer self, const render::ScenePointer& scene);
     bool isInScene() const { return render::Item::isValidID(_renderItemID); }
+    render::ItemID getRenderItemID() { return _renderItemID; }
     bool isMoving() const { return _moving; }
 
     void setPhysicsCallback(AvatarPhysicsCallback cb);
@@ -251,6 +255,22 @@ public:
     bool isFading() const { return _isFading; }
     void updateFadingStatus(render::ScenePointer scene);
 
+    Q_INVOKABLE virtual float getEyeHeight() const override;
+
+    // returns eye height of avatar in meters, ignoring avatar scale.
+    // if _targetScale is 1 then this will be identical to getEyeHeight.
+    virtual float getUnscaledEyeHeight() const override;
+
+    // returns true, if an acurate eye height estimage can be obtained by inspecting the avatar model skeleton and geometry,
+    // not all subclasses of AvatarData have access to this data.
+    virtual bool canMeasureEyeHeight() const override { return true; }
+
+
+    virtual float getModelScale() const { return _modelScale; }
+    virtual void setModelScale(float scale) { _modelScale = scale; }
+
+    virtual void setAvatarEntityDataChanged(bool value) override;
+
 public slots:
 
     // FIXME - these should be migrated to use Pose data instead
@@ -260,9 +280,17 @@ public slots:
     glm::vec3 getRightPalmPosition() const;
     glm::quat getRightPalmRotation() const;
 
+    // hooked up to Model::setURLFinished signal
     void setModelURLFinished(bool success);
 
+    // hooked up to Model::rigReady & rigReset signals
+    void rigReady();
+    void rigReset();
+
 protected:
+    float getUnscaledEyeHeightFromSkeleton() const;
+    void buildUnscaledEyeHeightCache();
+    void clearUnscaledEyeHeightCache();
     virtual const QString& getSessionDisplayNameForTransport() const override { return _empty; } // Save a tiny bit of bandwidth. Mixer won't look at what we send.
     QString _empty{};
     virtual void maybeUpdateSessionDisplayNameFromTransport(const QString& sessionDisplayName) override { _sessionDisplayName = sessionDisplayName; } // don't use no-op setter!
@@ -304,8 +332,8 @@ protected:
 
     void fade(render::Transaction& transaction, render::Transition::Type type);
 
-    glm::vec3 getBodyRightDirection() const { return getOrientation() * IDENTITY_RIGHT; }
-    glm::vec3 getBodyUpDirection() const { return getOrientation() * IDENTITY_UP; }
+    glm::vec3 getBodyRightDirection() const { return getWorldOrientation() * IDENTITY_RIGHT; }
+    glm::vec3 getBodyUpDirection() const { return getWorldOrientation() * IDENTITY_UP; }
     void measureMotionDerivatives(float deltaTime);
 
     float getSkeletonHeight() const;
@@ -333,7 +361,7 @@ protected:
     RateCounter<> _skeletonModelSimulationRate;
     RateCounter<> _jointDataSimulationRate;
 
-private:
+protected:
     class AvatarEntityDataHash {
     public:
         AvatarEntityDataHash(uint32_t h) : hash(h) {};
@@ -353,6 +381,7 @@ private:
     bool _isAnimatingScale { false };
     bool _mustFadeIn { false };
     bool _isFading { false };
+    float _modelScale { 1.0f };
 
     static int _jointConesID;
 
@@ -363,6 +392,7 @@ private:
     float _displayNameTargetAlpha { 1.0f };
     float _displayNameAlpha { 1.0f };
 
+    ThreadSafeValueCache<float> _unscaledEyeHeightCache { DEFAULT_AVATAR_EYE_HEIGHT };
 };
 
 #endif // hifi_Avatar_h

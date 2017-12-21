@@ -84,10 +84,10 @@ public:
     // new Scene/Engine rendering support
     void setVisibleInScene(bool newValue, const render::ScenePointer& scene);
     void setLayeredInFront(bool layered, const render::ScenePointer& scene);
+    void setLayeredInHUD(bool layered, const render::ScenePointer& scene);
     bool needsFixupInScene() const;
 
     bool needsReload() const { return _needsReload; }
-    bool initWhenReady(const render::ScenePointer& scene);
     bool addToScene(const render::ScenePointer& scene,
                     render::Transaction& transaction) {
         auto getters = render::Item::Status::Getters(0);
@@ -102,9 +102,10 @@ public:
     bool isVisible() const { return _isVisible; }
 
     bool isLayeredInFront() const { return _isLayeredInFront; }
+    bool isLayeredInHUD() const { return _isLayeredInHUD; }
 
     virtual void updateRenderItems();
-    void setRenderItemsNeedUpdate() { _renderItemsNeedUpdate = true; }
+    void setRenderItemsNeedUpdate();
     bool getRenderItemsNeedUpdate() { return _renderItemsNeedUpdate; }
     AABox getRenderableMeshBound() const;
     const render::ItemIDs& fetchRenderItemIDs() const;
@@ -203,8 +204,12 @@ public:
     /// Returns the extents of the model's mesh
     Extents getMeshExtents() const;
 
+    /// Returns the unscaled extents of the model's mesh
+    Extents getUnscaledMeshExtents() const;
+
     void setTranslation(const glm::vec3& translation);
     void setRotation(const glm::quat& rotation);
+    void setTransformNoUpdateRenderItems(const Transform& transform); // temporary HACK
 
     const glm::vec3& getTranslation() const { return _translation; }
     const glm::quat& getRotation() const { return _rotation; }
@@ -244,8 +249,7 @@ public:
 
     class MeshState {
     public:
-        QVector<glm::mat4> clusterMatrices;
-        gpu::BufferPointer clusterBuffer;
+        std::vector<glm::mat4> clusterMatrices;
     };
 
     const MeshState& getMeshState(int index) { return _meshStates.at(index); }
@@ -260,20 +264,22 @@ public:
 
     Q_INVOKABLE MeshProxyList getMeshes() const;
 
+    void scaleToFit();
+
 public slots:
     void loadURLFinished(bool success);
 
 signals:
     void setURLFinished(bool success);
     void setCollisionModelURLFinished(bool success);
+    void requestRenderUpdate();
+    void rigReady();
+    void rigReset();
 
 protected:
 
     void setBlendshapeCoefficients(const QVector<float>& coefficients) { _blendshapeCoefficients = coefficients; }
     const QVector<float>& getBlendshapeCoefficients() const { return _blendshapeCoefficients; }
-
-    /// Returns the unscaled extents of the model's mesh
-    Extents getUnscaledMeshExtents() const;
 
     /// Clear the joint states
     void clearJointState(int index);
@@ -312,12 +318,11 @@ protected:
     bool _snappedToRegistrationPoint; /// are we currently snapped to a registration point
     glm::vec3 _registrationPoint = glm::vec3(0.5f); /// the point in model space our center is snapped to
 
-    QVector<MeshState> _meshStates;
+    std::vector<MeshState> _meshStates;
 
     virtual void initJointStates();
 
     void setScaleInternal(const glm::vec3& scale);
-    void scaleToFit();
     void snapToRegistrationPoint();
 
     void computeMeshPartLocalBounds();
@@ -382,10 +387,11 @@ protected:
     QVector<std::shared_ptr<MeshPartPayload>> _collisionRenderItems;
     QMap<render::ItemID, render::PayloadPointer> _collisionRenderItemsMap;
 
-	QVector<std::shared_ptr<ModelMeshPartPayload>> _modelMeshRenderItems;
-	QMap<render::ItemID, render::PayloadPointer> _modelMeshRenderItemsMap;
-
+    QVector<std::shared_ptr<ModelMeshPartPayload>> _modelMeshRenderItems;
+    QMap<render::ItemID, render::PayloadPointer> _modelMeshRenderItemsMap;
     render::ItemIDs _modelMeshRenderItemIDs;
+    using ShapeInfo = struct { int meshIndex; };
+    std::vector<ShapeInfo> _modelMeshRenderItemShapes;
 
     bool _addedToScene { false }; // has been added to scene
     bool _needsFixupInScene { true }; // needs to be removed/re-added to scene
@@ -411,6 +417,7 @@ protected:
     int _renderInfoHasTransparent { false };
 
     bool _isLayeredInFront { false };
+    bool _isLayeredInHUD { false };
 
 private:
     float _loadingPriority { 0.0f };

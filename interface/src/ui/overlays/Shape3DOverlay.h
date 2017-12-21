@@ -23,7 +23,7 @@ public:
     virtual QString getType() const override { return TYPE; }
 
     Shape3DOverlay() {}
-    Shape3DOverlay(const Shape3DOverlay* Shape3DOverlay);
+    Shape3DOverlay(const Shape3DOverlay* shape3DOverlay);
     
     virtual void render(RenderArgs* args) override;
     virtual const render::ShapeKey getShapeKey() override;
@@ -36,6 +36,9 @@ public:
 
     void setProperties(const QVariantMap& properties) override;
     QVariant getProperty(const QString& property) override;
+
+protected:
+    Transform evalRenderTransform() override;
 
 private:
     float _borderSize;

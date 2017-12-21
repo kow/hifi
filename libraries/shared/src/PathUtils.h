@@ -14,6 +14,7 @@
 
 #include <QtCore/QObject>
 #include <QtCore/QUrl>
+#include <QtCore/QDir>
 
 #include "DependencyManager.h"
 
@@ -35,6 +36,10 @@ public:
 
     static QString getAppDataFilePath(const QString& filename);
     static QString getAppLocalDataFilePath(const QString& filename);
+
+    static QString generateTemporaryDir();
+
+    static int removeTemporaryApplicationDirs(QString appName = QString::null);
 
     static Qt::CaseSensitivity getFSCaseSensitivity();
     static QString stripFilename(const QUrl& url);

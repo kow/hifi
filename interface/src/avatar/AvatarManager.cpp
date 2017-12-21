@@ -28,6 +28,7 @@
 #include <shared/QtHelpers.h>
 #include <AvatarData.h>
 #include <PerfStat.h>
+#include <PrioritySortUtil.h>
 #include <RegisteredMetaTypes.h>
 #include <Rig.h>
 #include <SettingHandle.h>
@@ -53,7 +54,7 @@ const QUuid MY_AVATAR_KEY;  // NULL key
 
 AvatarManager::AvatarManager(QObject* parent) :
     _avatarsToFade(),
-    _myAvatar(std::make_shared<MyAvatar>(qApp->thread()))
+    _myAvatar(new MyAvatar(qApp->thread()), [](MyAvatar* ptr) { ptr->deleteLater(); })
 {
     // register a meta type for the weak pointer we'll use for the owning avatar mixer for each avatar
     qRegisterMetaType<QWeakPointer<Node> >("NodeWeakPointer");
@@ -142,32 +143,39 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
 
     PerformanceTimer perfTimer("otherAvatars");
 
-    auto avatarMap = getHashCopy();
-    QList<AvatarSharedPointer> avatarList = avatarMap.values();
+    class SortableAvatar: public PrioritySortUtil::Sortable {
+    public:
+        SortableAvatar() = delete;
+        SortableAvatar(const AvatarSharedPointer& avatar) : _avatar(avatar) {}
+        glm::vec3 getPosition() const override { return _avatar->getWorldPosition(); }
+        float getRadius() const override { return std::static_pointer_cast<Avatar>(_avatar)->getBoundingRadius(); }
+        uint64_t getTimestamp() const override { return std::static_pointer_cast<Avatar>(_avatar)->getLastRenderUpdateTime(); }
+        const AvatarSharedPointer& getAvatar() const { return _avatar; }
+    private:
+        AvatarSharedPointer _avatar;
+    };
+
     ViewFrustum cameraView;
     qApp->copyDisplayViewFrustum(cameraView);
+    PrioritySortUtil::PriorityQueue<SortableAvatar> sortedAvatars(cameraView,
+            AvatarData::_avatarSortCoefficientSize,
+            AvatarData::_avatarSortCoefficientCenter,
+            AvatarData::_avatarSortCoefficientAge);
 
-    std::priority_queue<AvatarPriority> sortedAvatars;
-    AvatarData::sortAvatars(avatarList, cameraView, sortedAvatars,
+    // sort
+    auto avatarMap = getHashCopy();
+    AvatarHash::iterator itr = avatarMap.begin();
+    while (itr != avatarMap.end()) {
+        const auto& avatar = std::static_pointer_cast<Avatar>(*itr);
+        // DO NOT update _myAvatar!  Its update has already been done earlier in the main loop.
+        // DO NOT update or fade out uninitialized Avatars
+        if (avatar != _myAvatar && avatar->isInitialized()) {
+            sortedAvatars.push(SortableAvatar(avatar));
+        }
+        ++itr;
+    }
 
-        [](AvatarSharedPointer avatar)->uint64_t{
-            return std::static_pointer_cast<Avatar>(avatar)->getLastRenderUpdateTime();
-        },
-
-        [](AvatarSharedPointer avatar)->float{
-            return std::static_pointer_cast<Avatar>(avatar)->getBoundingRadius();
-        },
-
-        [this](AvatarSharedPointer avatar)->bool{
-            const auto& castedAvatar = std::static_pointer_cast<Avatar>(avatar);
-            if (castedAvatar == _myAvatar || !castedAvatar->isInitialized()) {
-                // DO NOT update _myAvatar!  Its update has already been done earlier in the main loop.
-                // DO NOT update or fade out uninitialized Avatars
-                return true; // ignore it
-            }
-            return false;
-        });
-
+    // process in sorted order
     uint64_t startTime = usecTimestampNow();
     const uint64_t UPDATE_BUDGET = 2000; // usec
     uint64_t updateExpiry = startTime + UPDATE_BUDGET;
@@ -176,8 +184,14 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
 
     render::Transaction transaction;
     while (!sortedAvatars.empty()) {
-        const AvatarPriority& sortData = sortedAvatars.top();
-        const auto& avatar = std::static_pointer_cast<Avatar>(sortData.avatar);
+        const SortableAvatar& sortData = sortedAvatars.top();
+        const auto& avatar = std::static_pointer_cast<Avatar>(sortData.getAvatar());
+
+        bool ignoring = DependencyManager::get<NodeList>()->isPersonalMutingNode(avatar->getID());
+        if (ignoring) {
+            sortedAvatars.pop();
+            continue;
+        }
 
         // for ALL avatars...
         if (_shouldRender) {
@@ -201,7 +215,7 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
         uint64_t now = usecTimestampNow();
         if (now < updateExpiry) {
             // we're within budget
-            bool inView = sortData.priority > OUT_OF_VIEW_THRESHOLD;
+            bool inView = sortData.getPriority() > OUT_OF_VIEW_THRESHOLD;
             if (inView && avatar->hasNewJointData()) {
                 numAvatarsUpdated++;
             }
@@ -215,7 +229,7 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
             // --> some avatar velocity measurements may be a little off
 
             // no time simulate, but we take the time to count how many were tragically missed
-            bool inView = sortData.priority > OUT_OF_VIEW_THRESHOLD;
+            bool inView = sortData.getPriority() > OUT_OF_VIEW_THRESHOLD;
             if (!inView) {
                 break;
             }
@@ -224,9 +238,9 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
             }
             sortedAvatars.pop();
             while (inView && !sortedAvatars.empty()) {
-                const AvatarPriority& newSortData = sortedAvatars.top();
-                const auto& newAvatar = std::static_pointer_cast<Avatar>(newSortData.avatar);
-                inView = newSortData.priority > OUT_OF_VIEW_THRESHOLD;
+                const SortableAvatar& newSortData = sortedAvatars.top();
+                const auto& newAvatar = std::static_pointer_cast<Avatar>(newSortData.getAvatar());
+                inView = newSortData.getPriority() > OUT_OF_VIEW_THRESHOLD;
                 if (inView && newAvatar->hasNewJointData()) {
                     numAVatarsNotUpdated++;
                 }
@@ -252,19 +266,20 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
         qApp->getMain3DScene()->enqueueTransaction(transaction);
     }
 
-    _avatarSimulationTime = (float)(usecTimestampNow() - startTime) / (float)USECS_PER_MSEC;
     _numAvatarsUpdated = numAvatarsUpdated;
     _numAvatarsNotUpdated = numAVatarsNotUpdated;
 
     simulateAvatarFades(deltaTime);
+
+    _avatarSimulationTime = (float)(usecTimestampNow() - startTime) / (float)USECS_PER_MSEC;
 }
 
-void AvatarManager::postUpdate(float deltaTime) {
+void AvatarManager::postUpdate(float deltaTime, const render::ScenePointer& scene) {
     auto hashCopy = getHashCopy();
     AvatarHash::iterator avatarIterator = hashCopy.begin();
     for (avatarIterator = hashCopy.begin(); avatarIterator != hashCopy.end(); avatarIterator++) {
         auto avatar = std::static_pointer_cast<Avatar>(avatarIterator.value());
-        avatar->postUpdate(deltaTime);
+        avatar->postUpdate(deltaTime, scene);
     }
 }
 
@@ -296,7 +311,7 @@ void AvatarManager::simulateAvatarFades(float deltaTime) {
 }
 
 AvatarSharedPointer AvatarManager::newSharedAvatar() {
-    return std::make_shared<OtherAvatar>(qApp->thread());
+    return AvatarSharedPointer(new OtherAvatar(qApp->thread()), [](OtherAvatar* ptr) { ptr->deleteLater(); });
 }
 
 void AvatarManager::handleRemovedAvatar(const AvatarSharedPointer& removedAvatar, KillAvatarReason removalReason) {
@@ -434,7 +449,7 @@ void AvatarManager::handleCollisionEvents(const CollisionEvents& collisionEvents
                 static const int MAX_INJECTOR_COUNT = 3;
                 if (_collisionInjectors.size() < MAX_INJECTOR_COUNT) {
                     auto injector = AudioInjector::playSound(collisionSound, energyFactorOfFull, AVATAR_STRETCH_FACTOR,
-                                                             myAvatar->getPosition());
+                                                             myAvatar->getWorldPosition());
                     _collisionInjectors.emplace_back(injector);
                 }
                 myAvatar->collisionWithEntity(collision);

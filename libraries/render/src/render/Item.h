@@ -25,7 +25,7 @@
 
 #include "Args.h"
 
-#include "model/Material.h"
+#include <model/Material.h>
 #include "ShapePipeline.h"
 
 namespace render {
@@ -216,13 +216,6 @@ inline QDebug operator<<(QDebug debug, const ItemFilter& me) {
     return debug;
 }
 
-using ItemID = uint32_t;
-using ItemCell = int32_t;
-
-// A few typedefs for standard containers of ItemIDs
-using ItemIDs = std::vector<ItemID>;
-using ItemIDSet = std::set<ItemID>;
-
 // Handy type to just pass the ID and the bound of an item
 class ItemBound {
     public:
@@ -363,8 +356,13 @@ public:
     // Get the bound of the item expressed in world space (or eye space depending on the key.isWorldSpace())
     const Bound getBound() const { return _payload->getBound(); }
 
-    // Get the layer where the item belongs. 0 by default meaning NOT LAYERED
+    // Get the layer where the item belongs.
     int getLayer() const { return _payload->getLayer(); }
+
+    static const int LAYER_2D;
+    static const int LAYER_3D;
+    static const int LAYER_3D_FRONT;
+    static const int LAYER_3D_HUD;
 
     // Render call for the item
     void render(RenderArgs* args) const { _payload->render(args); }
@@ -493,6 +491,25 @@ template <> const Item::Bound payloadGetBound(const FooPointer& foo) {
 
 */
 // End of the example
+
+class PayloadProxyInterface {
+public:
+    using ProxyPayload = Payload<PayloadProxyInterface>;
+    using Pointer = ProxyPayload::DataPointer;
+
+    virtual ItemKey getKey() = 0;
+    virtual ShapeKey getShapeKey() = 0;
+    virtual Item::Bound getBound() = 0;
+    virtual void render(RenderArgs* args) = 0;
+    virtual uint32_t metaFetchMetaSubItems(ItemIDs& subItems) = 0;
+};
+
+template <> const ItemKey payloadGetKey(const PayloadProxyInterface::Pointer& payload);
+template <> const Item::Bound payloadGetBound(const PayloadProxyInterface::Pointer& payload);
+template <> void payloadRender(const PayloadProxyInterface::Pointer& payload, RenderArgs* args);
+template <> uint32_t metaFetchMetaSubItems(const PayloadProxyInterface::Pointer& payload, ItemIDs& subItems);
+template <> const ShapeKey shapeGetShapeKey(const PayloadProxyInterface::Pointer& payload);
+
 
 typedef Item::PayloadPointer PayloadPointer;
 typedef std::vector< PayloadPointer > Payloads;

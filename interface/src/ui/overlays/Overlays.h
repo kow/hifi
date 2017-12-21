@@ -85,12 +85,11 @@ class Overlays : public QObject {
     Q_PROPERTY(OverlayID keyboardFocusOverlay READ getKeyboardFocusOverlay WRITE setKeyboardFocusOverlay)
 
 public:
-    Overlays() {};
+    Overlays();
 
     void init();
     void update(float deltatime);
     void renderHUD(RenderArgs* renderArgs);
-    void render3DHUDOverlays(RenderArgs* renderArgs);
     void disable();
     void enable();
 
@@ -102,8 +101,6 @@ public:
     /// adds an overlay that's already been created
     OverlayID addOverlay(Overlay* overlay) { return addOverlay(Overlay::Pointer(overlay)); }
     OverlayID addOverlay(const Overlay::Pointer& overlay);
-
-    void setOverlayDrawHUDLayer(const OverlayID& id, const bool drawHUDLayer);
 
     bool mousePressEvent(QMouseEvent* event);
     bool mouseDoublePressEvent(QMouseEvent* event);
@@ -301,12 +298,12 @@ public slots:
     void sendMouseReleaseOnOverlay(const OverlayID& overlayID, const PointerEvent& event);
     void sendMouseMoveOnOverlay(const OverlayID& overlayID, const PointerEvent& event);
 
-    void sendHoverEnterOverlay(const OverlayID& id, const PointerEvent& event);
-    void sendHoverOverOverlay(const OverlayID& id, const PointerEvent& event);
-    void sendHoverLeaveOverlay(const OverlayID& id, const PointerEvent& event);
+    void sendHoverEnterOverlay(const OverlayID& overlayID, const PointerEvent& event);
+    void sendHoverOverOverlay(const OverlayID& overlayID, const PointerEvent& event);
+    void sendHoverLeaveOverlay(const OverlayID& overlayID, const PointerEvent& event);
 
     OverlayID getKeyboardFocusOverlay();
-    void setKeyboardFocusOverlay(OverlayID id);
+    void setKeyboardFocusOverlay(const OverlayID& id);
 
 signals:
     /**jsdoc
@@ -334,10 +331,7 @@ private:
 
     mutable QMutex _mutex { QMutex::Recursive };
     QMap<OverlayID, Overlay::Pointer> _overlaysHUD;
-    QMap<OverlayID, Overlay::Pointer> _overlays3DHUD;
     QMap<OverlayID, Overlay::Pointer> _overlaysWorld;
-
-    render::ShapePlumberPointer _shapePlumber;
 
 #if OVERLAY_PANELS
     QMap<OverlayID, OverlayPanel::Pointer> _panels;
@@ -357,6 +351,14 @@ private:
     OverlayID _currentHoverOverOverlayID { UNKNOWN_OVERLAY_ID };
 
     RayToOverlayIntersectionResult findRayIntersectionForMouseEvent(PickRay ray);
+
+private slots:
+    void mousePressPointerEvent(const OverlayID& overlayID, const PointerEvent& event);
+    void mouseMovePointerEvent(const OverlayID& overlayID, const PointerEvent& event);
+    void mouseReleasePointerEvent(const OverlayID& overlayID, const PointerEvent& event);
+    void hoverEnterPointerEvent(const OverlayID& overlayID, const PointerEvent& event);
+    void hoverOverPointerEvent(const OverlayID& overlayID, const PointerEvent& event);
+    void hoverLeavePointerEvent(const OverlayID& overlayID, const PointerEvent& event);
 };
 
 #endif // hifi_Overlays_h

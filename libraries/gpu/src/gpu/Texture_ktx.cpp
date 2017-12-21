@@ -23,6 +23,9 @@ using namespace gpu;
 using PixelsPointer = Texture::PixelsPointer;
 using KtxStorage = Texture::KtxStorage;
 
+std::vector<std::pair<std::shared_ptr<storage::FileStorage>, std::shared_ptr<std::mutex>>> KtxStorage::_cachedKtxFiles;
+std::mutex KtxStorage::_cachedKtxFilesMutex;
+
 struct GPUKTXPayload {
     using Version = uint8;
 
@@ -187,36 +190,44 @@ KtxStorage::KtxStorage(const std::string& filename) : _filename(filename) {
     }
 }
 
+// maybeOpenFile should be called with _cacheFileMutex already held to avoid modifying the file from multiple threads
 std::shared_ptr<storage::FileStorage> KtxStorage::maybeOpenFile() const {
-    // 1. Try to get the shared ptr
-    // 2. If it doesn't exist, grab the mutex around its creation
-    // 3. If it was created before we got the mutex, return it
-    // 4. Otherwise, create it
-
+    // Try to get the shared_ptr
     std::shared_ptr<storage::FileStorage> file = _cacheFile.lock();
     if (file) {
         return file;
     }
 
+    // If the file isn't open, create it and save a weak_ptr to it
+    file = std::make_shared<storage::FileStorage>(_filename.c_str());
+    _cacheFile = file;
+
     {
-        std::lock_guard<std::mutex> lock{ _cacheFileCreateMutex };
-
-        file = _cacheFile.lock();
-        if (file) {
-            return file;
-        }
-
-        file = std::make_shared<storage::FileStorage>(_filename.c_str());
-        _cacheFile = file;
+        // Add the shared_ptr to the global list of open KTX files, to be released at the beginning of the next present thread frame
+        std::lock_guard<std::mutex> lock(_cachedKtxFilesMutex);
+        _cachedKtxFiles.emplace_back(file, _cacheFileMutex);
     }
 
     return file;
+}
+
+void KtxStorage::releaseOpenKtxFiles() {
+    std::vector<std::pair<std::shared_ptr<storage::FileStorage>, std::shared_ptr<std::mutex>>> localKtxFiles;
+    {
+        std::lock_guard<std::mutex> lock(_cachedKtxFilesMutex);
+        localKtxFiles.swap(_cachedKtxFiles);
+    }
+    for (auto& cacheFileAndMutex : localKtxFiles) {
+        std::lock_guard<std::mutex> lock(*(cacheFileAndMutex.second));
+        cacheFileAndMutex.first.reset();
+    }
 }
 
 PixelsPointer KtxStorage::getMipFace(uint16 level, uint8 face) const {
     auto faceOffset = _ktxDescriptor->getMipFaceTexelsOffset(level, face);
     auto faceSize = _ktxDescriptor->getMipFaceTexelsSize(level, face);
     if (faceSize != 0 && faceOffset != 0) {
+        std::lock_guard<std::mutex> lock(*_cacheFileMutex);
         auto file = maybeOpenFile();
         if (file) {
             auto storageView = file->createView(faceSize, faceOffset);
@@ -262,6 +273,7 @@ void KtxStorage::assignMipData(uint16 level, const storage::StoragePointer& stor
         return;
     }
 
+    std::lock_guard<std::mutex> lock(*_cacheFileMutex);
     auto file = maybeOpenFile();
     if (!file) {
         qWarning() << "Failed to open file to assign mip data " << QString::fromStdString(_filename);
@@ -279,8 +291,6 @@ void KtxStorage::assignMipData(uint16 level, const storage::StoragePointer& stor
     imageData += ktx::IMAGE_SIZE_WIDTH;
 
     {
-        std::lock_guard<std::mutex> lock { _cacheFileWriteMutex };
-
         if (level != _minMipLevelAvailable - 1) {
             qWarning() << "Invalid level to be stored";
             return;
@@ -515,8 +525,6 @@ TexturePointer Texture::build(const ktx::KTXDescriptor& descriptor) {
     return texture;
 }
 
-
-
 TexturePointer Texture::unserialize(const cache::FilePointer& cacheEntry) {
     std::unique_ptr<ktx::KTX> ktxPointer = ktx::KTX::create(std::make_shared<storage::FileStorage>(cacheEntry->getFilepath().c_str()));
     if (!ktxPointer) {
@@ -536,7 +544,7 @@ TexturePointer Texture::unserialize(const std::string& ktxfile) {
     if (!ktxPointer) {
         return nullptr;
     }
-    
+
     auto texture = build(ktxPointer->toDescriptor());
     if (texture) {
         texture->setKtxBacking(ktxfile);
@@ -570,6 +578,12 @@ bool Texture::evalKTXFormat(const Element& mipFormat, const Element& texelFormat
         header.setCompressed(ktx::GLInternalFormat::COMPRESSED_RG_RGTC2, ktx::GLBaseInternalFormat::RG);
     } else if (texelFormat == Format::COLOR_COMPRESSED_SRGBA_HIGH && mipFormat == Format::COLOR_COMPRESSED_SRGBA_HIGH) {
         header.setCompressed(ktx::GLInternalFormat::COMPRESSED_SRGB_ALPHA_BPTC_UNORM, ktx::GLBaseInternalFormat::RGBA);
+    } else if (texelFormat == Format::COLOR_COMPRESSED_HDR_RGB && mipFormat == Format::COLOR_COMPRESSED_HDR_RGB) {
+        header.setCompressed(ktx::GLInternalFormat::COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT, ktx::GLBaseInternalFormat::RGB);
+    } else if (texelFormat == Format::COLOR_RGB9E5 && mipFormat == Format::COLOR_RGB9E5) {
+        header.setUncompressed(ktx::GLType::UNSIGNED_INT_5_9_9_9_REV, 1, ktx::GLFormat::RGB, ktx::GLInternalFormat::RGB9_E5, ktx::GLBaseInternalFormat::RGB);
+    } else if (texelFormat == Format::COLOR_R11G11B10 && mipFormat == Format::COLOR_R11G11B10) {
+        header.setUncompressed(ktx::GLType::UNSIGNED_INT_10F_11F_11F_REV, 1, ktx::GLFormat::RGB, ktx::GLInternalFormat::R11F_G11F_B10F, ktx::GLBaseInternalFormat::RGB);
     } else {
         return false;
     }
@@ -612,6 +626,12 @@ bool Texture::evalTextureFormat(const ktx::Header& header, Element& mipFormat, E
         } else {
             return false;
         }
+    } else if (header.getGLFormat() == ktx::GLFormat::RGB && header.getGLType() == ktx::GLType::UNSIGNED_INT_10F_11F_11F_REV) {
+        mipFormat = Format::COLOR_R11G11B10;
+        texelFormat = Format::COLOR_R11G11B10;
+    } else if (header.getGLFormat() == ktx::GLFormat::RGB && header.getGLType() == ktx::GLType::UNSIGNED_INT_5_9_9_9_REV) {
+        mipFormat = Format::COLOR_RGB9E5;
+        texelFormat = Format::COLOR_RGB9E5;
     } else if (header.isCompressed()) {
         if (header.getGLInternaFormat() == ktx::GLInternalFormat::COMPRESSED_SRGB_S3TC_DXT1_EXT) {
             mipFormat = Format::COLOR_COMPRESSED_SRGB;
@@ -631,6 +651,9 @@ bool Texture::evalTextureFormat(const ktx::Header& header, Element& mipFormat, E
         } else if (header.getGLInternaFormat() == ktx::GLInternalFormat::COMPRESSED_SRGB_ALPHA_BPTC_UNORM) {
             mipFormat = Format::COLOR_COMPRESSED_SRGBA_HIGH;
             texelFormat = Format::COLOR_COMPRESSED_SRGBA_HIGH;
+        } else if (header.getGLInternaFormat() == ktx::GLInternalFormat::COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT) {
+            mipFormat = Format::COLOR_COMPRESSED_HDR_RGB;
+            texelFormat = Format::COLOR_COMPRESSED_HDR_RGB;
         } else {
             return false;
         }

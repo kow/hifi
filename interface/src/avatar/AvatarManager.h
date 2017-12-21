@@ -41,7 +41,7 @@ public:
     void init();
 
     std::shared_ptr<MyAvatar> getMyAvatar() { return _myAvatar; }
-    glm::vec3 getMyAvatarPosition() const { return _myAvatar->getPosition(); }
+    glm::vec3 getMyAvatarPosition() const { return _myAvatar->getWorldPosition(); }
 
     // Null/Default-constructed QUuids will return MyAvatar
     Q_INVOKABLE virtual ScriptAvatarData* getAvatar(QUuid avatarID) override { return new ScriptAvatar(getAvatarBySessionID(avatarID)); }
@@ -55,7 +55,7 @@ public:
     void updateMyAvatar(float deltaTime);
     void updateOtherAvatars(float deltaTime);
 
-    void postUpdate(float deltaTime);
+    void postUpdate(float deltaTime, const render::ScenePointer& scene);
 
     void clearOtherAvatars();
     void deleteAllAvatars();
@@ -73,9 +73,9 @@ public:
     Q_INVOKABLE RayToAvatarIntersectionResult findRayIntersection(const PickRay& ray,
                                                                   const QScriptValue& avatarIdsToInclude = QScriptValue(),
                                                                   const QScriptValue& avatarIdsToDiscard = QScriptValue());
-    RayToAvatarIntersectionResult findRayIntersectionVector(const PickRay& ray,
-                                                            const QVector<EntityItemID>& avatarsToInclude,
-                                                            const QVector<EntityItemID>& avatarsToDiscard);
+    Q_INVOKABLE RayToAvatarIntersectionResult findRayIntersectionVector(const PickRay& ray,
+                                                                        const QVector<EntityItemID>& avatarsToInclude,
+                                                                        const QVector<EntityItemID>& avatarsToDiscard);
 
     // TODO: remove this HACK once we settle on optimal default sort coefficients
     Q_INVOKABLE float getAvatarSortCoefficient(const QString& name);

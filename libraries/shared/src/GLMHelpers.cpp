@@ -432,6 +432,12 @@ glm::vec3 toGlm(const xColor& color) {
     return glm::vec3(color.red, color.green, color.blue) / MAX_COLOR;
 }
 
+xColor xColorFromGlm(const glm::vec3 & color) {
+    static const float MAX_COLOR = 255.0f;
+    return { (uint8_t)(color.x * MAX_COLOR), (uint8_t)(color.y * MAX_COLOR), (uint8_t)(color.z * MAX_COLOR) };
+}
+
+
 glm::vec4 toGlm(const QColor& color) {
     return glm::vec4(color.redF(), color.greenF(), color.blueF(), color.alphaF());
 }
@@ -471,6 +477,14 @@ glm::mat4 createMatFromScaleQuatAndPos(const glm::vec3& scale, const glm::quat& 
     glm::vec3 zAxis = rot * glm::vec3(0.0f, 0.0f, scale.z);
     return glm::mat4(glm::vec4(xAxis, 0.0f), glm::vec4(yAxis, 0.0f),
                      glm::vec4(zAxis, 0.0f), glm::vec4(trans, 1.0f));
+}
+
+glm::mat4 createMatFromScale(const glm::vec3& scale) {
+    glm::vec3 xAxis = glm::vec3(scale.x, 0.0f, 0.0f);
+    glm::vec3 yAxis = glm::vec3(0.0f, scale.y, 0.0f);
+    glm::vec3 zAxis = glm::vec3(0.0f, 0.0f, scale.z);
+    return glm::mat4(glm::vec4(xAxis, 0.0f), glm::vec4(yAxis, 0.0f),
+                     glm::vec4(zAxis, 0.0f), glm::vec4(Vectors::ZERO, 1.0f));
 }
 
 // cancel out roll

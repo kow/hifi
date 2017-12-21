@@ -431,7 +431,7 @@ int Octree::readElementData(const OctreeElementPointer& destinationElement, cons
     return bytesRead;
 }
 
-void Octree::readBitstreamToTree(const unsigned char * bitstream, unsigned long int bufferSizeBytes,
+void Octree::readBitstreamToTree(const unsigned char * bitstream, uint64_t bufferSizeBytes,
                                  ReadBitstreamToTreeParams& args) {
     int bytesRead = 0;
     const unsigned char* bitstreamAt = bitstream;
@@ -925,8 +925,8 @@ int Octree::encodeTreeBitstream(const OctreeElementPointer& element,
         roomForOctalCode = packetData->startSubTree(newCode);
 
         if (newCode) {
-            delete[] newCode;
             codeLength = numberOfThreeBitSectionsInCode(newCode);
+            delete[] newCode;
         } else {
             codeLength = 1;
         }
@@ -1152,7 +1152,6 @@ int Octree::encodeTreeBitstreamRecursion(const OctreeElementPointer& element,
     OctreeElementPointer sortedChildren[NUMBER_OF_CHILDREN] = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     float distancesToChildren[NUMBER_OF_CHILDREN] = { 0, 0, 0, 0, 0, 0, 0, 0 };
     int indexOfChildren[NUMBER_OF_CHILDREN] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-    int currentCount = 0;
 
     for (int i = 0; i < NUMBER_OF_CHILDREN; i++) {
         OctreeElementPointer childElement = element->getChildAtIndex(i);
@@ -1174,7 +1173,6 @@ int Octree::encodeTreeBitstreamRecursion(const OctreeElementPointer& element,
         sortedChildren[i] = childElement;
         indexOfChildren[i] = i;
         distancesToChildren[i] = 0.0f;
-        currentCount++;
 
         // track stats
         // must check childElement here, because it could be we got here with no childElement
@@ -1185,7 +1183,7 @@ int Octree::encodeTreeBitstreamRecursion(const OctreeElementPointer& element,
 
     // for each child element in Distance sorted order..., check to see if they exist, are colored, and in view, and if so
     // add them to our distance ordered array of children
-    for (int i = 0; i < currentCount; i++) {
+    for (int i = 0; i < NUMBER_OF_CHILDREN; i++) {
         OctreeElementPointer childElement = sortedChildren[i];
         int originalIndex = indexOfChildren[i];
 
@@ -1276,7 +1274,7 @@ int Octree::encodeTreeBitstreamRecursion(const OctreeElementPointer& element,
     }
 
     // NOTE: the childrenDataBits indicates that there is an array of child element data included in this packet.
-    // We wil write this bit mask but we may come back later and update the bits that are actually included
+    // We will write this bit mask but we may come back later and update the bits that are actually included
     packetData->releaseReservedBytes(sizeof(childrenDataBits));
     continueThisLevel = packetData->appendBitMask(childrenDataBits);
 
@@ -1441,7 +1439,7 @@ int Octree::encodeTreeBitstreamRecursion(const OctreeElementPointer& element,
 
         // for each child element in Distance sorted order..., check to see if they exist, are colored, and in view, and if so
         // add them to our distance ordered array of children
-        for (int indexByDistance = 0; indexByDistance < currentCount; indexByDistance++) {
+        for (int indexByDistance = 0; indexByDistance < NUMBER_OF_CHILDREN; indexByDistance++) {
             OctreeElementPointer childElement = sortedChildren[indexByDistance];
             int originalIndex = indexOfChildren[indexByDistance];
 
@@ -1638,7 +1636,7 @@ bool Octree::readFromFile(const char* fileName) {
 
     QDataStream fileInputStream(&file);
     QFileInfo fileInfo(qFileName);
-    unsigned long fileLength = fileInfo.size();
+    uint64_t fileLength = fileInfo.size();
 
     emit importSize(1.0f, 1.0f, 1.0f);
     emit importProgress(0);
@@ -1715,7 +1713,7 @@ bool Octree::readFromURL(const QString& urlString) {
 }
 
 
-bool Octree::readFromStream(unsigned long streamLength, QDataStream& inputStream, const QString& marketplaceID) {
+bool Octree::readFromStream(uint64_t streamLength, QDataStream& inputStream, const QString& marketplaceID) {
     // decide if this is binary SVO or JSON-formatted SVO
     QIODevice *device = inputStream.device();
     char firstChar;
@@ -1723,145 +1721,14 @@ bool Octree::readFromStream(unsigned long streamLength, QDataStream& inputStream
     device->ungetChar(firstChar);
 
     if (firstChar == (char) PacketType::EntityData) {
-        qCDebug(octree) << "Reading from binary SVO Stream length:" << streamLength;
-        return readSVOFromStream(streamLength, inputStream);
+        qCWarning(octree) << "Reading from binary SVO no longer supported";
+        return false;
     } else {
         qCDebug(octree) << "Reading from JSON SVO Stream length:" << streamLength;
         return readJSONFromStream(streamLength, inputStream, marketplaceID);
     }
 }
 
-
-bool Octree::readSVOFromStream(unsigned long streamLength, QDataStream& inputStream) {
-    qWarning() << "SVO file format depricated. Support for reading SVO files is no longer support and will be removed soon.";
-
-    bool fileOk = false;
-
-    PacketVersion gotVersion = 0;
-
-    unsigned long headerLength = 0; // bytes in the header
-
-    bool wantImportProgress = true;
-
-    PacketType expectedType = expectedDataPacketType();
-    PacketVersion expectedVersion = versionForPacketType(expectedType);
-    bool hasBufferBreaks = versionHasSVOfileBreaks(expectedVersion);
-
-    // before reading the file, check to see if this version of the Octree supports file versions
-    if (getWantSVOfileVersions()) {
-
-        // read just enough of the file to parse the header...
-        const unsigned long HEADER_LENGTH = sizeof(int) + sizeof(PacketVersion);
-        unsigned char fileHeader[HEADER_LENGTH];
-        inputStream.readRawData((char*)&fileHeader, HEADER_LENGTH);
-
-        headerLength = HEADER_LENGTH; // we need this later to skip to the data
-
-        unsigned char* dataAt = (unsigned char*)&fileHeader;
-        unsigned long  dataLength = HEADER_LENGTH;
-
-        // if so, read the first byte of the file and see if it matches the expected version code
-        int intPacketType;
-        memcpy(&intPacketType, dataAt, sizeof(intPacketType));
-        PacketType gotType = (PacketType) intPacketType;
-
-        dataAt += sizeof(expectedType);
-        dataLength -= sizeof(expectedType);
-        gotVersion = *dataAt;
-
-        if (gotType == expectedType) {
-            if (canProcessVersion(gotVersion)) {
-                dataAt += sizeof(gotVersion);
-                dataLength -= sizeof(gotVersion);
-                fileOk = true;
-                qCDebug(octree, "SVO file version match. Expected: %d Got: %d",
-                            versionForPacketType(expectedDataPacketType()), gotVersion);
-
-                hasBufferBreaks = versionHasSVOfileBreaks(gotVersion);
-            } else {
-                qCDebug(octree, "SVO file version mismatch. Expected: %d Got: %d",
-                            versionForPacketType(expectedDataPacketType()), gotVersion);
-            }
-        } else {
-            qCDebug(octree) << "SVO file type mismatch. Expected: " << expectedType
-                        << " Got: " << gotType;
-        }
-
-    } else {
-        qCDebug(octree) << "   NOTE: this file type does not include type and version information.";
-        fileOk = true; // assume the file is ok
-    }
-
-    if (hasBufferBreaks) {
-        qCDebug(octree) << "    this version includes buffer breaks";
-    } else {
-        qCDebug(octree) << "    this version does not include buffer breaks";
-    }
-
-    if (fileOk) {
-
-        // if this version of the file does not include buffer breaks, then we need to load the entire file at once
-        if (!hasBufferBreaks) {
-
-            // read the entire file into a buffer, WHAT!? Why not.
-            unsigned long dataLength = streamLength - headerLength;
-            unsigned char* entireFileDataSection = new unsigned char[dataLength];
-            inputStream.readRawData((char*)entireFileDataSection, dataLength);
-
-            unsigned char* dataAt = entireFileDataSection;
-
-            ReadBitstreamToTreeParams args(NO_EXISTS_BITS, NULL, 0,
-                                                SharedNodePointer(), wantImportProgress, gotVersion);
-
-            readBitstreamToTree(dataAt, dataLength, args);
-            delete[] entireFileDataSection;
-
-        } else {
-
-
-            unsigned long dataLength = streamLength - headerLength;
-            unsigned long remainingLength = dataLength;
-            const unsigned long MAX_CHUNK_LENGTH = MAX_OCTREE_PACKET_SIZE * 2;
-            unsigned char* fileChunk = new unsigned char[MAX_CHUNK_LENGTH];
-
-            while (remainingLength > 0) {
-                quint16 chunkLength = 0;
-
-                inputStream.readRawData((char*)&chunkLength, sizeof(chunkLength));
-                remainingLength -= sizeof(chunkLength);
-
-                if (chunkLength > remainingLength) {
-                    qCDebug(octree) << "UNEXPECTED chunk size of:" << chunkLength
-                                << "greater than remaining length:" << remainingLength;
-                    break;
-                }
-
-                if (chunkLength > MAX_CHUNK_LENGTH) {
-                    qCDebug(octree) << "UNEXPECTED chunk size of:" << chunkLength
-                                << "greater than MAX_CHUNK_LENGTH:" << MAX_CHUNK_LENGTH;
-                    break;
-                }
-
-                inputStream.readRawData((char*)fileChunk, chunkLength);
-
-                remainingLength -= chunkLength;
-
-                unsigned char* dataAt = fileChunk;
-                unsigned long  dataLength = chunkLength;
-
-                ReadBitstreamToTreeParams args(NO_EXISTS_BITS, NULL, 0,
-                                                    SharedNodePointer(), wantImportProgress, gotVersion);
-
-                readBitstreamToTree(dataAt, dataLength, args);
-            }
-
-            delete[] fileChunk;
-        }
-    }
-
-
-    return fileOk;
-}
 
 // hack to get the marketplace id into the entities.  We will create a way to get this from a hash of
 // the entity later, but this helps us move things along for now
@@ -1887,7 +1754,7 @@ QJsonDocument addMarketplaceIDToDocumentEntities(QJsonDocument& doc, const QStri
 
 const int READ_JSON_BUFFER_SIZE = 2048;
 
-bool Octree::readJSONFromStream(unsigned long streamLength, QDataStream& inputStream, const QString& marketplaceID /*=""*/) {
+bool Octree::readJSONFromStream(uint64_t streamLength, QDataStream& inputStream, const QString& marketplaceID /*=""*/) {
     // if the data is gzipped we may not have a useful bytesAvailable() result, so just keep reading until
     // we get an eof.  Leave streamLength parameter for consistency.
 
@@ -1982,14 +1849,14 @@ bool Octree::writeToJSONFile(const char* fileName, const OctreeElementPointer& e
     return success;
 }
 
-unsigned long Octree::getOctreeElementsCount() {
-    unsigned long nodeCount = 0;
+uint64_t Octree::getOctreeElementsCount() {
+    uint64_t nodeCount = 0;
     recurseTreeWithOperation(countOctreeElementsOperation, &nodeCount);
     return nodeCount;
 }
 
 bool Octree::countOctreeElementsOperation(const OctreeElementPointer& element, void* extraData) {
-    (*(unsigned long*)extraData)++;
+    (*(uint64_t*)extraData)++;
     return true; // keep going
 }
 

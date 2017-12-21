@@ -16,13 +16,18 @@
 
 #include <glm/glm.hpp>
 
+#include <QUuid>
+
 #include <SettingHandle.h>
 #include <Rig.h>
 #include <Sound.h>
+#include <ScriptEngine.h>
 
 #include <controllers/Pose.h>
 #include <controllers/Actions.h>
+#include <AvatarConstants.h>
 #include <avatars-renderer/Avatar.h>
+#include <avatars-renderer/ScriptAvatar.h>
 
 #include "AtRestDetector.h"
 #include "MyCharacterController.h"
@@ -101,11 +106,19 @@ class MyAvatar : public Avatar {
      * @property collisionsEnabled {bool} This can be used to disable collisions between the avatar and the world.
      * @property useAdvancedMovementControls {bool} Stores the user preference only, does not change user mappings, this is done in the defaultScript
      *   "scripts/system/controllers/toggleAdvancedMovementForHandControllers.js".
+     * @property userHeight {number} The height of the user in sensor space. (meters).
+     * @property userEyeHeight {number} Estimated height of the users eyes in sensor space. (meters)
+     * @property SELF_ID {string} READ-ONLY. UUID representing "my avatar". Only use for local-only entities and overlays in situations where MyAvatar.sessionUUID is not available (e.g., if not connected to a domain).
+     *   Note: Likely to be deprecated.
+     * @property hmdRollControlEnabled {bool} When enabled the roll angle of your HMD will turn your avatar while flying.
+     * @property hmdRollControlDeadZone {number} If hmdRollControlEnabled is true, this value can be used to tune what roll angle is required to begin turning.
+     *   This angle is specified in degrees.
+     * @property hmdRollControlRate {number} If hmdRollControlEnabled is true, this value determines the maximum turn rate of your avatar when rolling your HMD in degrees per second.
      */
 
     // FIXME: `glm::vec3 position` is not accessible from QML, so this exposes position in a QML-native type
     Q_PROPERTY(QVector3D qmlPosition READ getQmlPosition)
-    QVector3D getQmlPosition() { auto p = getPosition(); return QVector3D(p.x, p.y, p.z); }
+    QVector3D getQmlPosition() { auto p = getWorldPosition(); return QVector3D(p.x, p.y, p.z); }
 
     Q_PROPERTY(bool shouldRenderLocally READ getShouldRenderLocally WRITE setShouldRenderLocally)
     Q_PROPERTY(glm::vec3 motorVelocity READ getScriptedMotorVelocity WRITE setScriptedMotorVelocity)
@@ -138,9 +151,17 @@ class MyAvatar : public Avatar {
     Q_PROPERTY(bool characterControllerEnabled READ getCharacterControllerEnabled WRITE setCharacterControllerEnabled)
     Q_PROPERTY(bool useAdvancedMovementControls READ useAdvancedMovementControls WRITE setUseAdvancedMovementControls)
 
+    Q_PROPERTY(float yawSpeed MEMBER _yawSpeed)
+    Q_PROPERTY(float pitchSpeed MEMBER _pitchSpeed)
+
     Q_PROPERTY(bool hmdRollControlEnabled READ getHMDRollControlEnabled WRITE setHMDRollControlEnabled)
     Q_PROPERTY(float hmdRollControlDeadZone READ getHMDRollControlDeadZone WRITE setHMDRollControlDeadZone)
     Q_PROPERTY(float hmdRollControlRate READ getHMDRollControlRate WRITE setHMDRollControlRate)
+
+    Q_PROPERTY(float userHeight READ getUserHeight WRITE setUserHeight)
+    Q_PROPERTY(float userEyeHeight READ getUserEyeHeight)
+
+    Q_PROPERTY(QUuid SELF_ID READ getSelfID CONSTANT)
 
     const QString DOMINANT_LEFT_HAND = "left";
     const QString DOMINANT_RIGHT_HAND = "right";
@@ -165,7 +186,7 @@ public:
     ~MyAvatar();
 
     void instantiableAvatar() override {};
-    void registerMetaTypes(QScriptEngine* engine);
+    void registerMetaTypes(ScriptEnginePointer engine);
 
     virtual void simulateAttachments(float deltaTime) override;
 
@@ -192,7 +213,7 @@ public:
     Q_INVOKABLE void clearIKJointLimitHistory(); // thread-safe
 
     void update(float deltaTime);
-    virtual void postUpdate(float deltaTime) override;
+    virtual void postUpdate(float deltaTime, const render::ScenePointer& scene) override;
     void preDisplaySide(RenderArgs* renderArgs);
 
     const glm::mat4& getHMDSensorMatrix() const { return _hmdSensorMatrix; }
@@ -390,6 +411,7 @@ public:
     Q_INVOKABLE glm::vec3 getEyePosition() const { return getHead()->getEyePosition(); }
 
     Q_INVOKABLE glm::vec3 getTargetAvatarPosition() const { return _targetAvatarPosition; }
+    Q_INVOKABLE ScriptAvatarData* getTargetAvatar() const;
 
     Q_INVOKABLE glm::vec3 getLeftHandPosition() const;
     Q_INVOKABLE glm::vec3 getRightHandPosition() const;
@@ -414,12 +436,19 @@ public:
     void updateLookAtTargetAvatar();
     void clearLookAtTargetAvatar();
 
-    virtual void setJointRotations(QVector<glm::quat> jointRotations) override;
+    virtual void setJointRotations(const QVector<glm::quat>& jointRotations) override;
     virtual void setJointData(int index, const glm::quat& rotation, const glm::vec3& translation) override;
     virtual void setJointRotation(int index, const glm::quat& rotation) override;
     virtual void setJointTranslation(int index, const glm::vec3& translation) override;
     virtual void clearJointData(int index) override;
+
+    virtual void setJointData(const QString& name, const glm::quat& rotation, const glm::vec3& translation)  override;
+    virtual void setJointRotation(const QString& name, const glm::quat& rotation)  override;
+    virtual void setJointTranslation(const QString& name, const glm::vec3& translation)  override;
+    virtual void clearJointData(const QString& name) override;
     virtual void clearJointsData() override;
+
+
 
     Q_INVOKABLE bool pinJoint(int index, const glm::vec3& position, const glm::quat& orientation);
     Q_INVOKABLE bool clearPinOnJoint(int index);
@@ -521,12 +550,21 @@ public:
     Q_INVOKABLE bool isUp(const glm::vec3& direction) { return glm::dot(direction, _worldUpDirection) > 0.0f; }; // true iff direction points up wrt avatar's definition of up.
     Q_INVOKABLE bool isDown(const glm::vec3& direction) { return glm::dot(direction, _worldUpDirection) < 0.0f; };
 
+    void setUserHeight(float value);
+    float getUserHeight() const;
+    float getUserEyeHeight() const;
+
+    virtual SpatialParentTree* getParentTree() const override;
+
+    const QUuid& getSelfID() const { return AVATAR_SELF_ID; }
+
 public slots:
     void increaseSize();
     void decreaseSize();
     void resetSize();
-    float getDomainMinScale();
-    float getDomainMaxScale();
+
+    void setGravity(float gravity);
+    float getGravity();
 
     void goToLocation(const glm::vec3& newPosition,
                       bool hasOrientation = false, const glm::quat& newOrientation = glm::quat(),
@@ -568,6 +606,8 @@ public slots:
     glm::vec3 getPositionForAudio();
     glm::quat getOrientationForAudio();
 
+    virtual void setModelScale(float scale) override;
+
 signals:
     void audioListenerModeChanged();
     void transformChanged();
@@ -580,6 +620,12 @@ signals:
     void wentActive();
     void skeletonChanged();
     void dominantHandChanged(const QString& hand);
+    void sensorToWorldScaleChanged(float sensorToWorldScale);
+    void attachmentsChanged();
+    void scaleChanged();
+
+private slots:
+    void leaveDomain();
 
 private:
 
@@ -596,6 +642,8 @@ private:
     bool isMyAvatar() const override { return true; }
     virtual int parseDataFromBuffer(const QByteArray& buffer) override;
     virtual glm::vec3 getSkeletonPosition() const override;
+
+    void saveAvatarScale();
 
     glm::vec3 getScriptedMotorVelocity() const { return _scriptedMotorVelocity; }
     float getScriptedMotorTimescale() const { return _scriptedMotorTimescale; }
@@ -616,8 +664,6 @@ private:
     virtual void setSkeletonModelURL(const QUrl& skeletonModelURL) override;
 
     void setVisibleInSceneIfReady(Model* model, const render::ScenePointer& scene, bool visiblity);
-
-private:
 
     virtual void updatePalms() override {}
     void lateUpdatePalms();
@@ -693,14 +739,14 @@ private:
     bool _clearOverlayWhenMoving { true };
     QString _dominantHand { DOMINANT_RIGHT_HAND };
 
-    const float ROLL_CONTROL_DEAD_ZONE_DEFAULT = 8.0f; // deg
-    const float ROLL_CONTROL_RATE_DEFAULT = 2.5f; // deg/sec/deg
+    const float ROLL_CONTROL_DEAD_ZONE_DEFAULT = 8.0f; // degrees
+    const float ROLL_CONTROL_RATE_DEFAULT = 114.0f; // degrees / sec
+
     bool _hmdRollControlEnabled { true };
     float _hmdRollControlDeadZone { ROLL_CONTROL_DEAD_ZONE_DEFAULT };
     float _hmdRollControlRate { ROLL_CONTROL_RATE_DEFAULT };
-    float _lastDrivenSpeed { 0.0f };
 
-    // working copies -- see AvatarData for thread-safe _sensorToWorldMatrixCache, used for outward facing access
+    // working copy -- see AvatarData for thread-safe _sensorToWorldMatrixCache, used for outward facing access
     glm::mat4 _sensorToWorldMatrix { glm::mat4() };
 
     // cache of the current HMD sensor position and orientation in sensor space.
@@ -766,8 +812,6 @@ private:
 
     AtRestDetector _hmdAtRestDetector;
     bool _lastIsMoving { false };
-    bool _hoverReferenceCameraFacingIsCaptured { false };
-    glm::vec3 _hoverReferenceCameraFacing { 0.0f, 0.0f, -1.0f }; // hmd sensor space
 
     // all poses are in sensor-frame
     std::map<controller::Action, controller::Pose> _controllerPoseMap;
@@ -794,6 +838,9 @@ private:
     void setAway(bool value);
 
     std::vector<int> _pinnedJoints;
+
+    // height of user in sensor space, when standing erect.
+    ThreadSafeValueCache<float> _userHeight { DEFAULT_AVATAR_HEIGHT };
 };
 
 QScriptValue audioListenModeToScriptValue(QScriptEngine* engine, const AudioListenerMode& audioListenerMode);

@@ -407,11 +407,10 @@ void NodeList::sendDomainServerCheckIn() {
             qCDebug(networking) << "hardwareAddress " << hardwareAddress;
             packetStream << hardwareAddress;
 
-            // now add the machine fingerprint - a null UUID if logged in, real one if not logged in
+            // now add the machine fingerprint
             auto accountManager = DependencyManager::get<AccountManager>();
             qCDebug(networking) << "FingerprintUtils::getMachineFingerprint() " << FingerprintUtils::getMachineFingerprint();
-            //packetStream << QUuid::createUuid();
-            packetStream << (accountManager->isLoggedIn() ? QUuid() : FingerprintUtils::getMachineFingerprint());
+            packetStream << FingerprintUtils::getMachineFingerprint();
         }
 
         // pack our data to send to the domain-server including
@@ -581,10 +580,10 @@ void NodeList::pingPunchForDomainServer() {
         flagTimeForConnectionStep(LimitedNodeList::ConnectionStep::SendPingsToDS);
 
         // send the ping packet to the local and public sockets for this node
-        auto localPingPacket = constructICEPingPacket(PingType::Local, _sessionUUID);
+        auto localPingPacket = constructICEPingPacket(PingType::Local, _domainHandler.getICEClientID());
         sendPacket(std::move(localPingPacket), _domainHandler.getICEPeer().getLocalSocket());
 
-        auto publicPingPacket = constructICEPingPacket(PingType::Public, _sessionUUID);
+        auto publicPingPacket = constructICEPingPacket(PingType::Public, _domainHandler.getICEClientID());
         sendPacket(std::move(publicPingPacket), _domainHandler.getICEPeer().getPublicSocket());
 
         _domainHandler.getICEPeer().incrementConnectionAttempts();
@@ -833,7 +832,7 @@ void NodeList::sendIgnoreRadiusStateToNode(const SharedNodePointer& destinationN
 void NodeList::ignoreNodeBySessionID(const QUuid& nodeID, bool ignoreEnabled) {
     // enumerate the nodes to send a reliable ignore packet to each that can leverage it
     if (!nodeID.isNull() && _sessionUUID != nodeID) {
-        eachMatchingNode([&nodeID](const SharedNodePointer& node)->bool {
+        eachMatchingNode([](const SharedNodePointer& node)->bool {
             if (node->getType() == NodeType::AudioMixer || node->getType() == NodeType::AvatarMixer) {
                 return true;
             } else {
@@ -1003,8 +1002,8 @@ void NodeList::maybeSendIgnoreSetToNode(SharedNodePointer newNode) {
 }
 
 void NodeList::setAvatarGain(const QUuid& nodeID, float gain) {
-    // cannot set gain of yourself or nobody
-    if (!nodeID.isNull() && _sessionUUID != nodeID) {
+    // cannot set gain of yourself
+    if (_sessionUUID != nodeID) {
         auto audioMixer = soloNodeOfType(NodeType::AudioMixer);
         if (audioMixer) {
             // setup the packet
@@ -1012,10 +1011,15 @@ void NodeList::setAvatarGain(const QUuid& nodeID, float gain) {
 
             // write the node ID to the packet
             setAvatarGainPacket->write(nodeID.toRfc4122());
-            // We need to convert the gain in dB (from the script) to an amplitude before packing it.
-            setAvatarGainPacket->writePrimitive(packFloatGainToByte(fastExp2f(gain / 6.0206f)));
 
-            qCDebug(networking) << "Sending Set Avatar Gain packet UUID: " << uuidStringWithoutCurlyBraces(nodeID) << "Gain:" << gain;
+            // We need to convert the gain in dB (from the script) to an amplitude before packing it.
+            setAvatarGainPacket->writePrimitive(packFloatGainToByte(fastExp2f(gain / 6.02059991f)));
+
+            if (nodeID.isNull()) {
+                qCDebug(networking) << "Sending Set MASTER Avatar Gain packet with Gain:" << gain;
+            } else {
+                qCDebug(networking) << "Sending Set Avatar Gain packet with UUID: " << uuidStringWithoutCurlyBraces(nodeID) << "Gain:" << gain;
+            }
 
             sendPacket(std::move(setAvatarGainPacket), *audioMixer);
             QWriteLocker{ &_avatarGainMapLock };
@@ -1025,7 +1029,7 @@ void NodeList::setAvatarGain(const QUuid& nodeID, float gain) {
             qWarning() << "Couldn't find audio mixer to send set gain request";
         }
     } else {
-        qWarning() << "NodeList::setAvatarGain called with an invalid ID or an ID which matches the current session ID:" << nodeID;
+        qWarning() << "NodeList::setAvatarGain called with an ID which matches the current session ID:" << nodeID;
     }
 }
 
